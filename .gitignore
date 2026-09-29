@@ -1,0 +1,91 @@
+# ============================================================
+# PlatformIO / ESP32 Projekt
+# ============================================================
+
+# PlatformIO Build-Verzeichnis
+# Enthält kompilierte Firmware, Libraries und Zwischendateien.
+.pio/
+
+# PlatformIO Cache
+.pioenvs/
+.piolibdeps/
+
+
+# ============================================================
+# Visual Studio Code
+# ============================================================
+
+# Lokale VS-Code-Einstellungen.
+# Für PlatformIO normalerweise nicht notwendig im Repository.
+.vscode/
+
+# Falls später einzelne VS-Code-Dateien bewusst versioniert
+# werden sollen, kann dieser Bereich angepasst werden.
+
+
+# ============================================================
+# Betriebssystem / Windows
+# ============================================================
+
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+
+# Temporäre Windows-Dateien
+*.tmp
+*.temp
+*.bak
+*.old
+*.swp
+*~
+
+
+# ============================================================
+# Log- und Debug-Dateien
+# ============================================================
+
+*.log
+*.dmp
+
+
+# ============================================================
+# Kompilierte Dateien / Firmware
+# ============================================================
+
+*.o
+*.obj
+*.elf
+*.map
+
+# BIN-Dateien werden normalerweise von PlatformIO erzeugt.
+*.bin
+
+# HEX-Dateien ebenfalls nicht versionieren.
+*.hex
+
+
+# ============================================================
+# Python-Reste, falls Hilfsskripte verwendet werden
+# ============================================================
+
+__pycache__/
+*.py[cod]
+
+
+# ============================================================
+# macOS / Linux
+# ============================================================
+
+.DS_Store
+.Trashes
+.directory
+
+
+# ============================================================
+# Lokale Sicherungsdateien
+# ============================================================
+
+*.backup
+*.backup.*
+*.orig
