@@ -72,7 +72,28 @@ struct ClockSettings {
   bool     circadianMode  = false;      // Feature 1: Tageszeit-Farben
   bool     showDate       = false;      // Feature 2: Datum
   bool     particleEffect = false;      // Feature 3: Sternenstaub
+
+  // Optionales Haus-WLAN; der Setup-Access-Point bleibt immer aktiv.
+  bool     wifiEnabled    = false;
+  String   wifiSSID       = "";
+  String   wifiPassword   = "";
 } settings;
+
+// Laufzeitstatus der optionalen Haus-WLAN-Verbindung.
+bool wifiConnectPending = false;
+uint32_t wifiConnectStartedMs = 0;
+static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+
+// Touchcontroller des WT32-SC01 (FT6336U/FT6x36-kompatibel).
+static const uint8_t TOUCH_I2C_ADDR = 0x38;
+static const uint8_t TOUCH_REG_TD_STATUS = 0x02;
+
+// Infoseite: beim Start und nach Antippen 10 Sekunden sichtbar.
+bool infoScreenActive = true;
+uint32_t infoScreenUntilMs = 0;
+uint32_t lastInfoRedrawMs = 0;
+bool touchWasDown = false;
+static const uint32_t INFO_SCREEN_DURATION_MS = 10000;
 
 struct UiColors { uint16_t axis, tick, text; } ui;
 
@@ -175,6 +196,9 @@ void loadSettings() {
   settings.circadianMode  = prefs.getBool("circ", settings.circadianMode);
   settings.showDate       = prefs.getBool("date", settings.showDate);
   settings.particleEffect = prefs.getBool("part", settings.particleEffect);
+  settings.wifiEnabled    = prefs.getBool("wifi_on", settings.wifiEnabled);
+  settings.wifiSSID       = prefs.getString("wifi_ssid", settings.wifiSSID);
+  settings.wifiPassword   = prefs.getString("wifi_pass", settings.wifiPassword);
   prefs.end();
 }
 
@@ -571,6 +595,133 @@ void renderFrame() {
 }
 
 // ============================================================
+//  Touch + lokale Infoseite
+// ============================================================
+
+// Nur die Anzahl der Beruehrungspunkte lesen.
+// Fuer "irgendwo antippen" brauchen wir keine kalibrierten X/Y-Koordinaten.
+bool isDisplayTouched() {
+  Wire.beginTransmission(TOUCH_I2C_ADDR);
+  Wire.write(TOUCH_REG_TD_STATUS);
+  if (Wire.endTransmission(false) != 0) return false;
+
+  if (Wire.requestFrom((uint8_t)TOUCH_I2C_ADDR, (uint8_t)1) != 1) return false;
+
+  uint8_t touches = Wire.read() & 0x0F;
+  return touches > 0 && touches <= 2;
+}
+
+// Infoseite aktivieren bzw. die 10-Sekunden-Frist neu starten.
+void showInfoScreen() {
+  infoScreenActive = true;
+  infoScreenUntilMs = millis() + INFO_SCREEN_DURATION_MS;
+  lastInfoRedrawMs = 0;
+}
+
+// Infoseite direkt auf dem TFT zeichnen.
+// Sie wird waehrend der Anzeige regelmaessig aktualisiert, damit z.B.
+// eine spaeter zustande gekommene Haus-WLAN-IP sichtbar wird.
+void drawInfoScreen() {
+  // Die komplette Infoseite zuerst unsichtbar im vorhandenen PSRAM-Sprite
+  // aufbauen und erst danach in einem Schritt auf das TFT uebertragen.
+  // Dadurch gibt es kein sichtbares Loeschen/Neu-Zeichnen mehr.
+  img.fillSprite(TFT_BLACK);
+  img.setTextDatum(TL_DATUM);
+
+  int y = 12;
+  img.setTextColor(TFT_CYAN, TFT_BLACK);
+  img.drawString("Fibonacci Spiralen-Uhr", 14, y, 4);
+  y += 44;
+
+  img.setTextColor(TFT_YELLOW, TFT_BLACK);
+  img.drawString("Setup-WLAN", 14, y, 2);
+  y += 21;
+
+  img.setTextColor(TFT_WHITE, TFT_BLACK);
+  img.drawString(String("SSID: ") + AP_SSID, 14, y, 2);
+  y += 19;
+  img.drawString(String("IP:   ") + WiFi.softAPIP().toString(), 14, y, 2);
+  y += 27;
+
+  img.setTextColor(TFT_YELLOW, TFT_BLACK);
+  img.drawString("Haus-WLAN", 14, y, 2);
+  y += 21;
+
+  img.setTextColor(TFT_WHITE, TFT_BLACK);
+  if (!settings.wifiEnabled) {
+    img.drawString("Deaktiviert", 14, y, 2);
+    y += 19;
+  } else {
+    img.drawString(String("SSID: ") + settings.wifiSSID, 14, y, 2);
+    y += 19;
+
+    if (WiFi.status() == WL_CONNECTED) {
+      img.setTextColor(TFT_GREEN, TFT_BLACK);
+      img.drawString("Status: Verbunden", 14, y, 2);
+      y += 19;
+      img.setTextColor(TFT_WHITE, TFT_BLACK);
+      img.drawString(String("IP:     ") + WiFi.localIP().toString(), 14, y, 2);
+      y += 19;
+    } else if (wifiConnectPending) {
+      img.setTextColor(TFT_YELLOW, TFT_BLACK);
+      img.drawString("Status: Verbindung wird hergestellt ...", 14, y, 2);
+      y += 19;
+    } else {
+      img.setTextColor(TFT_RED, TFT_BLACK);
+      img.drawString("Status: Nicht verbunden", 14, y, 2);
+      y += 19;
+    }
+  }
+
+  y += 8;
+  img.setTextColor(TFT_YELLOW, TFT_BLACK);
+  img.drawString("Zeitquelle", 14, y, 2);
+  y += 21;
+
+  img.setTextColor(TFT_WHITE, TFT_BLACK);
+  img.drawString(rtcOk ? "Hardware-RTC" : "Software-Uhr", 14, y, 2);
+
+  // Hinweis am unteren Rand.
+  img.setTextDatum(BC_DATUM);
+  img.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  img.drawString("Display antippen: Info fuer 10 Sekunden",
+                 screenWidth / 2, screenHeight - 7, 2);
+
+  // Erst jetzt das komplett fertige Bild sichtbar machen.
+  img.pushSprite(0, 0);
+
+  // Datum fuer spaetere Uhrendarstellung wieder auf Standard setzen.
+  img.setTextDatum(TL_DATUM);
+}
+
+// Touch auf steigende Flanke auswerten.
+// Ein gehaltenes Display verlaengert die Anzeige dadurch nicht permanent.
+void serviceTouchAndInfo() {
+  bool touched = isDisplayTouched();
+
+  if (touched && !touchWasDown) {
+    Serial.println("Touch erkannt -> Infoseite fuer 10 Sekunden");
+    showInfoScreen();
+  }
+  touchWasDown = touched;
+
+  if (!infoScreenActive) return;
+
+  // Einmal pro Sekunde neu zeichnen, damit WLAN-Status/IP aktuell bleiben.
+  // Das komplette Bild wird dabei flimmerfrei aus dem Sprite uebertragen.
+  if (lastInfoRedrawMs == 0 || millis() - lastInfoRedrawMs >= 1000) {
+    lastInfoRedrawMs = millis();
+    drawInfoScreen();
+  }
+
+  // Ueberlaufssicher pruefen, ob die 10 Sekunden abgelaufen sind.
+  if ((int32_t)(millis() - infoScreenUntilMs) >= 0) {
+    infoScreenActive = false;
+    Serial.println("Infoseite beendet -> Uhr");
+  }
+}
+
+// ============================================================
 //  Webserver: Einstellungsseite
 // ============================================================
 uint32_t parseColor(const String& s, uint32_t fallback) {
@@ -610,6 +761,59 @@ String checkTag(const char* name, const char* id, const char* text, bool on) {
   return c;
 }
 
+// HTML-Sonderzeichen fuer die Anzeige von SSIDs maskieren.
+String htmlEscape(const String& value) {
+  String out;
+  out.reserve(value.length() + 8);
+  for (size_t i = 0; i < value.length(); i++) {
+    char c = value[i];
+    if (c == '&') out += "&amp;";
+    else if (c == '<') out += "&lt;";
+    else if (c == '>') out += "&gt;";
+    else if (c == '"') out += "&quot;";
+    else if (c == '\'') out += "&#39;";
+    else out += c;
+  }
+  return out;
+}
+
+// Verbindung zum gespeicherten Haus-WLAN starten.
+// Die Funktion wartet nicht auf die Verbindung.
+void startStationWifi() {
+  wifiConnectPending = false;
+
+  if (!settings.wifiEnabled || settings.wifiSSID.length() == 0) {
+    WiFi.disconnect(false);
+    Serial.println("Haus-WLAN: deaktiviert");
+    return;
+  }
+
+  Serial.printf("Haus-WLAN: Verbindungsversuch mit \"%s\" gestartet ...\n",
+                settings.wifiSSID.c_str());
+
+  WiFi.begin(settings.wifiSSID.c_str(), settings.wifiPassword.c_str());
+  wifiConnectStartedMs = millis();
+  wifiConnectPending = true;
+}
+
+// Verbindung im Hintergrund ueberwachen, ohne Anzeige/Webserver zu blockieren.
+void serviceStationWifi() {
+  if (!settings.wifiEnabled || !wifiConnectPending) return;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnectPending = false;
+    Serial.printf("Haus-WLAN: VERBUNDEN, IP = %s\n",
+                  WiFi.localIP().toString().c_str());
+    return;
+  }
+
+  if (millis() - wifiConnectStartedMs >= WIFI_CONNECT_TIMEOUT_MS) {
+    wifiConnectPending = false;
+    Serial.println("Haus-WLAN: innerhalb von 15 s nicht verbunden.");
+    Serial.println("Setup-Access-Point bleibt weiterhin erreichbar.");
+  }
+}
+
 String buildPage() {
   String p;
   p.reserve(7000);
@@ -624,7 +828,7 @@ String buildPage() {
   .section { background: #303030; padding: 15px; border-radius: 8px; margin-bottom: 18px; text-align: left; }
   .section h3 { margin-top: 0; color: #ffaa00; font-size: 16px; border-bottom: 1px solid #444; padding-bottom: 5px; }
   label { font-size: 14px; color: #ccc; display: block; margin-bottom: 8px; }
-  select, input[type="color"] { width: 100%; box-sizing: border-box; padding: 10px; margin-bottom: 12px; border-radius: 6px; border: 1px solid #444; background: #222; color: #fff; }
+  select, input[type="color"], input[type="text"], input[type="password"] { width: 100%; box-sizing: border-box; padding: 10px; margin-bottom: 12px; border-radius: 6px; border: 1px solid #444; background: #222; color: #fff; }
   input[type="color"] { height: 50px; cursor: pointer; border: none; padding: 0; }
   .slider { display: flex; align-items: center; margin-bottom: 10px; }
   .slider input { flex-grow: 1; margin: 0 10px 0 0; accent-color: #00bfff; }
@@ -674,6 +878,42 @@ String buildPage() {
   p += checkTag("disp", "disp", "Digitales Datum", settings.showDate);
   p += checkTag("part", "part", "Kosmischer Partikeleffekt", settings.particleEffect);
   p += "</div><button type=\"submit\">Konfiguration anwenden</button></form>";
+
+  // WLAN hat ein eigenes Formular, damit Anzeige-Checkboxen beim
+  // Speichern der Netzwerkdaten nicht unbeabsichtigt veraendert werden.
+  p += "<form action=\"/savewifi\" method=\"POST\">"
+       "<div class=\"section\" style=\"margin-top:18px\"><h3>WLAN &amp; Netzwerk</h3>";
+  p += checkTag("wifi_on", "wifi_on", "Mit vorhandenem WLAN verbinden", settings.wifiEnabled);
+  p += "<label>WLAN-Name (SSID):</label><input type=\"text\" name=\"wifi_ssid\" value=\"";
+  p += htmlEscape(settings.wifiSSID);
+  p += "\" maxlength=\"32\" autocomplete=\"off\">";
+
+  p += "<label>WLAN-Passwort:</label>"
+       "<input type=\"password\" name=\"wifi_pass\" value=\"\" maxlength=\"64\" "
+       "placeholder=\"Leer lassen = gespeichertes Passwort behalten\" autocomplete=\"new-password\">";
+
+  p += "<label>Status: ";
+  if (!settings.wifiEnabled) {
+    p += "deaktiviert";
+  } else if (WiFi.status() == WL_CONNECTED) {
+    p += "verbunden mit ";
+    p += htmlEscape(WiFi.SSID());
+    p += " &ndash; IP ";
+    p += WiFi.localIP().toString();
+  } else if (wifiConnectPending) {
+    p += "Verbindung wird hergestellt ...";
+  } else {
+    p += "nicht verbunden";
+  }
+  p += "</label>";
+
+  p += "<label>Setup-Zugang: ";
+  p += AP_SSID;
+  p += " &ndash; ";
+  p += WiFi.softAPIP().toString();
+  p += "</label>";
+
+  p += "<button type=\"submit\">WLAN-Einstellungen speichern</button></div></form>";
 
   DateTime now = getNow();
   char tb[40];
@@ -734,6 +974,45 @@ void handleSave() {
   // Nichtleere Antwort vermeidet die irrefuehrende WebServer-Warnung.
   server.sendHeader("Location", "/", true);
   server.send(303, "text/plain", "Einstellungen gespeichert");
+}
+
+void handleSaveWifi() {
+  Serial.println();
+  Serial.println("=== POST /savewifi empfangen ===");
+
+  settings.wifiEnabled = server.hasArg("wifi_on");
+
+  String newSSID = server.hasArg("wifi_ssid") ? server.arg("wifi_ssid") : "";
+  newSSID.trim();
+  settings.wifiSSID = newSSID;
+
+  // Leer lassen bedeutet: bereits gespeichertes Passwort behalten.
+  String newPassword = server.hasArg("wifi_pass") ? server.arg("wifi_pass") : "";
+  if (newPassword.length() > 0) {
+    settings.wifiPassword = newPassword;
+  }
+
+  prefs.begin("fibclock", false);
+  prefs.putBool("wifi_on", settings.wifiEnabled);
+  prefs.putString("wifi_ssid", settings.wifiSSID);
+  prefs.putString("wifi_pass", settings.wifiPassword);
+  prefs.end();
+
+  Serial.printf("  WLAN aktiviert: %s\n", settings.wifiEnabled ? "JA" : "NEIN");
+  Serial.printf("  SSID          : %s\n", settings.wifiSSID.c_str());
+  Serial.printf("  Passwort      : %s\n",
+                settings.wifiPassword.length() ? "gespeichert" : "leer");
+
+  WiFi.disconnect(false);
+  wifiConnectPending = false;
+
+  if (settings.wifiEnabled) {
+    delay(50);
+    startStationWifi();
+  }
+
+  server.sendHeader("Location", "/", true);
+  server.send(303, "text/plain", "WLAN-Einstellungen gespeichert");
 }
 
 void handleSetTime() {
@@ -858,39 +1137,48 @@ Serial.println();
 
   initParticles();
 
-  // --- WLAN Access Point + Webserver ---
-  WiFi.mode(WIFI_AP);
+  // --- WLAN: Setup-AP bleibt immer aktiv; Haus-WLAN ist optional ---
+  WiFi.mode(WIFI_AP_STA);
   bool apOk = WiFi.softAP(AP_SSID, AP_PASS);
   Serial.printf("WLAN Access Point: %s\n", apOk ? "OK" : "FEHLER");
   String ip = WiFi.softAPIP().toString();
   Serial.print("Einstellungen: http://");
   Serial.println(ip);
 
+  // Gespeichertes Haus-WLAN im Hintergrund verbinden.
+  startStationWifi();
+
   server.on("/", HTTP_GET, handleRoot);
   server.on("/save", HTTP_POST, handleSave);
+  server.on("/savewifi", HTTP_POST, handleSaveWifi);
   server.on("/settime", HTTP_POST, handleSetTime);
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("Webserver gestartet.");
 
-  // --- kurzer Startbildschirm ---
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Fibonacci Spiralen-Uhr", 20, 20, 4);
-  tft.drawString(String("WLAN: ") + AP_SSID, 20, 80, 2);
-  tft.drawString(String("Passwort: ") + AP_PASS, 20, 105, 2);
-  tft.drawString(String("Einstellungen: http://") + ip, 20, 130, 2);
-  tft.drawString(rtcOk ? "RTC: OK" : "RTC: NICHT GEFUNDEN (SDA=IO18, SCL=IO19 pruefen)", 20, 165, 2);
-  delay(3500);
+  // --- Infoseite beim Start 10 Sekunden anzeigen ---
+  // Kein delay(): WLAN, Webserver und Touch bleiben waehrenddessen aktiv.
+  showInfoScreen();
+  drawInfoScreen();
 }
 
 void loop() {
   server.handleClient();
 
-  static uint32_t lastFrame = 0;
-  if (millis() - lastFrame >= 30) {
-    lastFrame = millis();
-    renderFrame();
+  // Nicht blockierende Ueberwachung des optionalen Haus-WLANs.
+  serviceStationWifi();
+
+  // Touch auswerten und ggf. Infoseite anzeigen/aktualisieren.
+  serviceTouchAndInfo();
+
+  // Solange die Infoseite aktiv ist, darf die Uhr sie nicht ueberzeichnen.
+  if (!infoScreenActive) {
+    static uint32_t lastFrame = 0;
+    if (millis() - lastFrame >= 30) {
+      lastFrame = millis();
+      renderFrame();
+    }
   }
+
   delay(1);
 }
