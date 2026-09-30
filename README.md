@@ -1,165 +1,181 @@
 # Fibonacci-Spiralen-Uhr für WT32-SC01
 
-Eine grafische Fibonacci-Uhr für das **WT32-SC01** mit ESP32-WROVER-B
-und 3,5"-ST7796-Display.
+Grafische Fibonacci-Uhr für das **WT32-SC01** mit ESP32-WROVER-B und
+3,5"-ST7796-Display (480 × 320).
 
-Die Uhr stellt Stunden und Minuten mit zwei logarithmischen Spiralen
-dar. Zusätzlich besitzt sie feste Stunden- und Minutenskalen sowie eine
-Sekundenanzeige aus 60 Leuchtpunkten auf einer Ellipse. Darstellung,
-Farben und Effekte können über eine Weboberfläche eingestellt werden.
+Die Uhr zeigt Stunden und Minuten mit logarithmischen Spiralen. Dazu
+kommen feste Skalen, eine Sekundenellipse mit Leuchtpunkt sowie optional
+eine digitale Datums- und Zeitanzeige. Darstellung, WLAN, NTP und
+Zeitzone werden über eine Weboberfläche konfiguriert.
 
 ## Hardware
 
--   WT32-SC01 mit ESP32-WROVER-B
--   3,5"-Display, 480 × 320 Pixel
--   ST7796 über SPI
--   PSRAM
--   Touchcontroller auf dem I²C-Bus
--   optionale WT32-SC01 Extension-Platine
+- WT32-SC01 mit ESP32-WROVER-B
+- ST7796 über SPI
+- PSRAM
+- Touchcontroller auf I²C-Adresse `0x38`
+- WT32-SC01 Extension-Platine Version 1.2
 
-### RTC-Hinweis
+### RTC
 
-Bei der verwendeten Extension-Platine **Version 1.2** ist zwar ein
-Batteriehalter vorhanden, der RTC-Bestückungsplatz **U10 ist jedoch
-nicht bestückt**. Beim I²C-Scan wurde nur der Touchcontroller auf
-Adresse `0x38` gefunden.
+Bei der verwendeten Extension-Platine V1.2 ist der RTC-Bestückungsplatz
+**U10 nicht bestückt**. Beim I²C-Scan wurde nur der Touchcontroller auf
+`0x38` gefunden. Die normale Zeitquelle ist daher NTP. Alternativ kann
+die Uhrzeit vom Smartphone übernommen werden.
 
-Das Programm kann deshalb auch ohne Hardware-RTC betrieben werden. Die
-Uhrzeit kann über die Weboberfläche vom Smartphone übernommen werden.
-Eine spätere WLAN-/NTP-Synchronisierung ist vorgesehen.
+## Software und PlatformIO
 
-## Software
+Verwendet werden unter anderem TFT_eSPI 2.5.43, Adafruit RTClib 2.1.4,
+ESP32 WiFi/WebServer und `time.h` für NTP.
 
-Das Projekt wird mit **PlatformIO** und dem Arduino-Framework erstellt.
+Wichtige Einstellungen:
 
-Verwendete Bibliotheken:
+- ST7796 über SPI
+- PSRAM mit `BOARD_HAS_PSRAM`
+- `lib_ldf_mode = deep+`
+- SPI-Takt 40 MHz
+- MISO GPIO12, MOSI GPIO13, SCLK GPIO14
+- CS GPIO15, DC GPIO21, RESET GPIO22, Backlight GPIO23
 
--   TFT_eSPI 2.5.43
--   Adafruit RTClib 2.1.4
+## Speicher und flimmerfreie Darstellung
 
-Wichtige PlatformIO-Einstellungen:
+Es werden zwei vollständige 16-Bit-Sprites im PSRAM verwendet: `img` für
+das aktuelle Bild bzw. die Infoseite und `bgSprite` als
+Hintergrund-Cache.
 
--   ST7796 über SPI
--   PSRAM aktiviert (`BOARD_HAS_PSRAM`)
--   `lib_ldf_mode = deep+`
+Ein 480×320-Sprite benötigt 307.200 Byte. Nach Erzeugung beider Sprites
+blieben beim Test rund **3,58 MB PSRAM frei**.
 
-`deep+` ist erforderlich, damit die Abhängigkeiten von RTClib / Adafruit
-BusIO einschließlich SPI korrekt erkannt werden.
-
-## Speicher
-
-Für eine flimmerfreie Darstellung werden zwei vollständige
-16-Bit-Sprites im PSRAM verwendet:
-
--   `img` -- aktuelles Bild
--   `bgSprite` -- Hintergrund-Cache
-
-Ein Sprite benötigt `480 × 320 × 2 = 307.200 Byte`. Zwei Sprites
-benötigen etwa 614 kB PSRAM. Beim Test blieben nach Erzeugung beider
-Sprites rund 3,58 MB PSRAM frei.
+Auch die Infoseite wird vollständig im Sprite aufgebaut und anschließend
+in einem Schritt übertragen. Dadurch bleiben Uhr und Infoseite
+flimmerfrei.
 
 ## Anzeige der Uhr
 
 ### Stunden
 
-Die **Stundenspirale** wird an der senkrechten Skala abgelesen: - obere
-Hälfte: 12 bis 6 Uhr - untere Hälfte: 6 bis 12 Uhr - volle Stunden
-besitzen verstärkte Skalenstriche
+Die Stundenspirale wird an der senkrechten Skala abgelesen. Oben liegen
+12 bis 6 Uhr, unten 6 bis 12 Uhr. Volle Stunden besitzen verstärkte
+Skalenstriche.
 
 ### Minuten
 
-Die **Minutenspirale** wird an der waagrechten Skala abgelesen: - rechte
-Hälfte: 0 bis 30 Minuten - linke Hälfte: 30 bis 60 Minuten - alle 5
-Minuten wird ein verstärkter Skalenstrich dargestellt
+Die Minutenspirale wird an der waagrechten Skala abgelesen. Rechts
+liegen 0 bis 30 Minuten, links 30 bis 60 Minuten. Alle 5 Minuten wird
+ein verstärkter Skalenstrich dargestellt.
 
-Die Markierungspunkte der Spiralen mit den jeweiligen Skalen zeigen die
-aktuelle Zeit.
+Skalen und Beschriftungen sind von der globalen Helligkeitsregelung
+entkoppelt und bleiben dadurch gut lesbar.
 
 ### Sekunden
 
-60 Punkte liegen auf einer Ellipse um das Zifferblatt. Die Ellipsengröße
-wird aus den äußeren Endpunkten der Stunden- und Minutenskalen
-abgeleitet.
+60 Punkte liegen auf einer Ellipse, deren Radien aus den äußeren
+Endpunkten der Stunden- und Minutenskalen berechnet werden. Der aktuelle
+Sekundenpunkt leuchtet und besitzt einen kurzen Nachleuchteffekt. Seine
+Farbe ist über die Weboberfläche einstellbar.
 
-Der aktuelle Sekundenpunkt leuchtet deutlich und besitzt einen kurzen
-Nachleuchteffekt. Die Sekundenpunkte werden zuletzt gezeichnet und
-bleiben dadurch auch an Kreuzungen mit den Spiralen sichtbar.
+### Digitale Datums- und Zeitanzeige
+
+Bei aktivierter Option **„Digitales Datum"** werden zusätzlich
+angezeigt:
+
+- Datum am unteren Rand
+- digitale Uhrzeit oben rechts im Format `HH:MM:SS`
+
+Digitale Anzeige und Fibonacci-Spiralen verwenden dieselbe Zeitquelle.
 
 ## Web-Konfiguration
 
-Nach dem Start erzeugt die Uhr einen eigenen WLAN-Access-Point.
+Die Uhr arbeitet gleichzeitig als eigener Access Point und optional als
+Teilnehmer im Haus-WLAN.
 
-**WLAN:** `Fibonacci-Clock-Setup`
+### Setup-WLAN
 
-Die Einstellungsseite ist standardmäßig unter `http://192.168.4.1`
-erreichbar.
+- SSID: `Fibonacci-Clock-Setup`
+- Adresse: `http://192.168.4.1`
 
-Bedienung: 1. Smartphone, Tablet oder PC mit `Fibonacci-Clock-Setup`
-verbinden. 2. Browser öffnen. 3. `http://192.168.4.1` aufrufen. 4.
-Einstellungen ändern. 5. **Konfiguration anwenden** auswählen.
+Dieser Zugang bleibt als Rückfallebene erhalten.
 
-Die Einstellungen werden mit `Preferences` im nichtflüchtigen Speicher
-des ESP32 gespeichert und bleiben nach einem Neustart erhalten.
+### Haus-WLAN
 
-## Einstellmöglichkeiten
+Nach erfolgreicher Verbindung erhält die Uhr vom Router eine lokale
+IP-Adresse, z. B. `192.168.1.138`. Die Einstellungsseite ist dann auch
+direkt über diese Adresse aus dem Hausnetz erreichbar.
 
-### Hintergrund
+Konfigurierbar sind WLAN Ein/Aus, SSID, Passwort und Zeitzone. Die Werte
+werden in `Preferences` gespeichert. Ein leeres Passwortfeld behält das
+gespeicherte Passwort.
 
--   Tiefschwarz
--   Gebürstetes Metall
+Die WLAN-Verbindung wird nur bei echten Änderungen von WLAN Ein/Aus,
+SSID oder Passwort neu aufgebaut. Ein Zeitzonenwechsel verursacht
+**keinen WLAN-Neustart**.
 
-### Darstellungseffekt
+## NTP und Zeitquellen
 
--   Klassisch
--   Neon-Glühen
--   mathematischer Farbverlauf
+Nach Verbindung mit dem Haus-WLAN synchronisiert sich die Uhr
+automatisch über NTP.
 
-### Farben
+Verwendete Server:
 
-Getrennte Farbauswahl für: - Stundenspirale - Minutenspirale -
-Sekundenanzeige
+- `pool.ntp.org`
+- `time.google.com`
+- `time.cloudflare.com`
 
-### Helligkeit
+Nach erfolgreichem Abgleich läuft die ESP32-Systemzeit weiter. Ein
+erneuter Abgleich erfolgt ungefähr alle 12 Stunden.
 
-Die globale Helligkeit kann über einen Schieberegler eingestellt werden.
-Skalen und Beschriftungen sind davon entkoppelt, damit sie auch bei
-reduzierter Helligkeit lesbar bleiben.
+Priorität der Zeitquellen:
 
-### Linienstärke
+1. Hardware-RTC, falls vorhanden
+2. NTP
+3. Software-Uhr / manuelle Übernahme vom Smartphone
 
-Die Stärke der Spiralen kann über einen Schieberegler verändert werden.
+## Zeitzonen
 
-### Zusatzfunktionen
+Die Zeitzone wird über ein Pulldown-Menü ausgewählt und gespeichert.
 
--   Tageszeit-Farbmodus
--   Datumsanzeige
--   kosmischer Partikeleffekt
+Verfügbar sind:
 
-## Uhrzeit einstellen
+- Mitteleuropa -- Wien, Berlin, Zürich, Paris
+- Großbritannien / Irland -- London, Dublin
+- Osteuropa -- Helsinki, Bukarest
+- UTC -- Weltzeit
+- USA Eastern -- New York
+- USA Central -- Chicago
+- USA Mountain -- Denver
+- USA Pacific -- Los Angeles
+- Japan -- Tokio
+- Australien Eastern -- Sydney
 
-Da auf der verwendeten Extension-Platine keine RTC bestückt ist, kann
-die Uhrzeit über die Einstellungsseite vom Smartphone übernommen werden:
+POSIX-Zeitzonenregeln sorgen bei den entsprechenden Regionen automatisch
+für Sommer-/Winterzeit.
 
-1.  Mit `Fibonacci-Clock-Setup` verbinden.
-2.  Einstellungsseite öffnen.
-3.  **Uhrzeit vom Handy übernehmen** auswählen.
+## Infoseite und Touch
 
-Ohne Hardware-RTC geht die Zeit nach einem vollständigen Neustart bzw.
-Stromausfall verloren.
+Beim Einschalten erscheint für etwa **10 Sekunden** eine Infoseite. Sie
+zeigt Setup-WLAN und IP, Haus-WLAN und lokale IP, Verbindungsstatus,
+Zeitquelle, Zeitzone und letzten NTP-Abgleich.
 
-## Geplante WLAN-/NTP-Erweiterung
+Ein Antippen des Displays blendet die Infoseite erneut für 10 Sekunden
+ein. Danach erfolgt automatisch die Rückkehr zur Uhr.
 
-Die Weboberfläche soll später um die Verbindung mit einem vorhandenen
-WLAN erweitert werden: - WLAN aktivieren/deaktivieren - SSID -
-WLAN-Passwort - Verbindungsstatus - IP-Adresse -
-NTP-Zeitsynchronisierung
+## Einstellmöglichkeiten der Anzeige
 
-Der Access Point `Fibonacci-Clock-Setup` soll als Konfigurations- und
-Rückfallzugang erhalten bleiben.
+- Hintergrund: Tiefschwarz oder gebürstetes Metall
+- Effekt: Klassisch, Neon-Glühen oder mathematischer Farbverlauf
+- getrennte Farben für Stunden-, Minuten- und Sekundenanzeige
+- globale Helligkeit
+- Linienstärke
+- Tageszeit-Farbmodus
+- digitales Datum und digitale Uhrzeit
+- kosmischer Partikeleffekt
 
-Vorgesehene Priorität der Zeitquellen: 1. NTP bei verfügbarem
-konfiguriertem WLAN 2. manuelle Zeitübernahme vom Smartphone 3.
-Software-Uhr des ESP32
+## Manuelle Zeitübernahme
+
+Die Schaltfläche **„Uhrzeit vom Handy übernehmen"** bleibt als
+Rückfallebene erhalten. Ohne NTP oder Hardware-RTC geht eine rein
+manuell gesetzte Software-Zeit nach einem vollständigen Stromausfall
+verloren.
 
 ## Projektstruktur
 
@@ -169,40 +185,121 @@ Fibonacci-Uhr/
 ├── README.md
 ├── platformio.ini
 ├── src/
-│   └── main.cpp
+│ └── main.cpp
 ├── include/
 └── lib/
 ```
 
 Das PlatformIO-Verzeichnis `.pio/` wird nicht in Git gespeichert.
 
-## Hinweise zur Display-Konfiguration
-
-Das WT32-SC01 verwendet in diesem Projekt den **ST7796 über SPI**. Eine
-zuvor getestete 8-Bit-Parallel-Konfiguration war für dieses Board nicht
-korrekt und führte zu einem dauerhaft weißen Display.
-
 ## Diagnose
 
-Beim Programmstart werden im seriellen Monitor unter anderem
-ausgegeben: - geladene Einstellungen - I²C-/RTC-Status -
-Displayinitialisierung - PSRAM-Status - freier Heap und freies PSRAM -
-Sprite-Erzeugung - WLAN-Status und Adresse der Weboberfläche -
-Webserver-Status
+Der serielle Monitor zeigt unter anderem I²C-/RTC-Status, Display- und
+PSRAM-Initialisierung, freien Speicher, WLAN-Status, IP-Adressen,
+NTP-Synchronisierung, Zeitzone und empfangene Web-Konfiguration.
 
-Beim Speichern über die Weboberfläche werden die empfangenen und
-gespeicherten Werte ebenfalls ausgegeben.
+## Aktueller getesteter Stand
 
-## Aktueller Projektstand
+Erfolgreich getestet:
 
-Erfolgreich getestet: - ST7796-Display über SPI - Querformat 480 × 320 -
-PSRAM - zwei vollständige 16-Bit-Sprites - flimmerfreie Darstellung -
-Stunden- und Minutenspiralen - Stunden- und Minutenskalen - verstärkte
-Hauptskalen - Sekundenellipse mit Leuchtpunkt - einstellbare Farben und
-Effekte - Helligkeitsregelung - Web-Konfiguration - dauerhafte
-Speicherung der Einstellungen - Zeitübernahme vom Smartphone
+- ST7796 über SPI und 480 × 320 Querformat
+- PSRAM und zwei Vollbild-Sprites
+- flimmerfreie Uhr und Infoseite
+- Fibonacci-Stunden- und Minutenspiralen
+- verstärkte Hauptskalen
+- Sekundenellipse mit Nachleuchteffekt
+- einstellbare Farben, Helligkeit und Linienstärke
+- digitale Datumsanzeige
+- digitale Uhrzeitanzeige `HH:MM:SS`
+- Web-Konfiguration
+- AP+STA gleichzeitig
+- Zugriff über Setup-WLAN und Haus-WLAN
+- Touch-Infoseite mit automatischer Rückkehr
+- NTP-Synchronisierung
+- Zeitzonenauswahl und automatische Sommer-/Winterzeit
+- Zeitzonenwechsel ohne Netzwerkneustart
+- Neustart mit automatischer WLAN- und NTP-Wiederherstellung
 
-## Lizenz / Verwendung
+## Alternative Hardware -- ungetestet
 
-Dieses Projekt befindet sich in privater Entwicklung. Eine konkrete
-Lizenz wurde bisher nicht festgelegt.
+Die folgenden Boards sind **nicht mit diesem Projekt getestet**. Die
+Nennung bedeutet ausdrücklich **keine Funktionsgarantie und keine
+zugesicherte Kompatibilität**. Je nach Board müssen `platformio.ini`,
+Displaytreiber, GPIO-Belegung, Touchcontroller, Displayrotation,
+Hintergrundbeleuchtung und PSRAM-Konfiguration angepasst werden.
+
+Für die derzeitige Architektur ist **PSRAM dringend empfohlen**, da zwei
+vollständige 480×320×16-Bit-Sprites verwendet werden.
+
+### WT32-SC01 Plus
+
+ESP32-S3-basierter möglicher Nachfolger. Displayinterface, Pinbelegung
+und Controller-Konfiguration unterscheiden sich vom getesteten
+WT32-SC01.
+
+**Erwarteter Anpassungsaufwand:** hoch.
+
+### Makerfabs MaTouch ESP32-S3 SPI TFT 3.5"
+
+- ESP32-S3
+- 3,5", 480 × 320
+- ILI9488 über SPI
+- kapazitiver FT6236-Touch
+- PSRAM vorhanden
+
+Durch gleiche Auflösung und SPI grundsätzlich interessant. Treiber,
+Pins, Touch und PlatformIO-Konfiguration müssen angepasst werden.
+
+**Erwarteter Anpassungsaufwand:** mittel.
+
+### Makerfabs MaTouch ESP32-S3 Parallel TFT 3.5"
+
+- ESP32-S3
+- 3,5", 480 × 320
+- ILI9488
+- 16-Bit-Parallelinterface
+- FT6236-Touch
+- 8 MB PSRAM
+
+Die Speichergröße passt gut zu den Vollbild-Sprites; die
+Displayansteuerung unterscheidet sich jedoch grundlegend von der
+getesteten SPI-Version.
+
+**Erwarteter Anpassungsaufwand:** hoch.
+
+### Makerfabs ESP32 3.5" TFT Touch mit Camera
+
+- ESP32-WROVER
+- 3,5", 480 × 320
+- ILI9488 über SPI
+- Varianten mit kapazitivem oder resistivem Touch
+
+Durch ESP32-WROVER, SPI und gleiche Auflösung grundsätzlich interessant.
+Display-, Touch- und Pin-Konfiguration müssen dennoch angepasst werden.
+
+**Erwarteter Anpassungsaufwand:** mittel.
+
+### Andere ESP32-/ESP32-S3-Boards
+
+Eine Portierung ist grundsätzlich denkbar, wenn ausreichend PSRAM, WLAN
+und ein unterstütztes TFT vorhanden sind. Bei anderer Auflösung müssen
+zusätzlich Bildschirmgeometrie, Mittelpunkt, Skalenradien und
+Sekundenellipse angepasst werden.
+
+> **Wichtig:** Getestet und dokumentiert ist derzeit ausschließlich das
+> WT32-SC01 mit ESP32-WROVER-B und ST7796 über SPI. Alle Alternativen
+> sind mögliche Portierungsziele ohne Funktionsgarantie.
+
+## Lizenz
+
+Dieses Projekt wird unter der **PolyForm Noncommercial License 1.0.0**
+veröffentlicht.
+
+Die Software darf für nichtkommerzielle Zwecke verwendet, untersucht,
+verändert und weitergegeben werden. Eine kommerzielle Nutzung ist nicht
+gestattet.
+
+Die vollständigen Bedingungen stehen in `LICENSE.md`.
+
+**Hinweis:** Wegen des Ausschlusses kommerzieller Nutzung ist dies keine
+klassische Open-Source-Lizenz im Sinne der Open Source Initiative.

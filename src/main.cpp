@@ -22,6 +22,7 @@
 #include <Preferences.h>
 #include <TFT_eSPI.h>
 #include <RTClib.h>
+#include <time.h>      // ESP32-Systemzeit / NTP
 
 // ============================================================
 //  Konfiguration
@@ -61,6 +62,35 @@ bool     rtcOk = false;
 DateTime softBase;              // Ersatzzeit, falls keine RTC gefunden wird
 uint32_t softBaseMs = 0;
 
+// NTP-Status
+bool ntpTimeValid = false;
+bool ntpSyncRequested = false;
+uint32_t ntpRequestStartedMs = 0;
+uint32_t lastNtpAttemptMs = 0;
+time_t lastNtpSyncEpoch = 0;
+
+// Auswahl wichtiger Zeitzonen.
+// Die POSIX-Regeln enthalten, wo erforderlich, automatische Sommer-/Winterzeit.
+struct TimezoneEntry {
+  const char* name;
+  const char* posix;
+};
+
+const TimezoneEntry TIMEZONES[] = {
+  { "Mitteleuropa - Wien, Berlin, Zuerich, Paris", "CET-1CEST,M3.5.0/2,M10.5.0/3" },
+  { "Grossbritannien / Irland - London, Dublin",   "GMT0BST,M3.5.0/1,M10.5.0" },
+  { "Osteuropa - Helsinki, Bukarest",              "EET-2EEST,M3.5.0/3,M10.5.0/4" },
+  { "UTC - Weltzeit",                              "UTC0" },
+  { "USA Eastern - New York",                      "EST5EDT,M3.2.0/2,M11.1.0/2" },
+  { "USA Central - Chicago",                       "CST6CDT,M3.2.0/2,M11.1.0/2" },
+  { "USA Mountain - Denver",                       "MST7MDT,M3.2.0/2,M11.1.0/2" },
+  { "USA Pacific - Los Angeles",                   "PST8PDT,M3.2.0/2,M11.1.0/2" },
+  { "Japan - Tokio",                               "JST-9" },
+  { "Australien Eastern - Sydney",                 "AEST-10AEDT,M10.1.0/2,M4.1.0/3" }
+};
+
+static const int TIMEZONE_COUNT = sizeof(TIMEZONES) / sizeof(TIMEZONES[0]);
+
 struct ClockSettings {
   int      backgroundType = 1;          // 0 = Schwarz, 1 = Gebuerstetes Metall
   int      effectType     = 1;          // 0 = Klassisch, 1 = Neon-Glow, 2 = Farbverlauf
@@ -77,12 +107,19 @@ struct ClockSettings {
   bool     wifiEnabled    = false;
   String   wifiSSID       = "";
   String   wifiPassword   = "";
+
+  // Index in TIMEZONES; Standard = Mitteleuropa.
+  int      timezoneIndex  = 0;
 } settings;
 
 // Laufzeitstatus der optionalen Haus-WLAN-Verbindung.
 bool wifiConnectPending = false;
 uint32_t wifiConnectStartedMs = 0;
 static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+
+// Echte WLAN-Aenderungen werden erst nach der HTTP-Antwort angewendet.
+bool wifiRestartPending = false;
+uint32_t wifiRestartAtMs = 0;
 
 // Touchcontroller des WT32-SC01 (FT6336U/FT6x36-kompatibel).
 static const uint8_t TOUCH_I2C_ADDR = 0x38;
@@ -178,6 +215,19 @@ void printMemory(const char* title) {
 // ============================================================
 DateTime getNow() {
   if (rtcOk) return rtc.now();
+
+  // Nach erfolgreichem NTP-Abgleich die lokale ESP32-Systemzeit verwenden.
+  if (ntpTimeValid) {
+    time_t nowEpoch = time(nullptr);
+    struct tm localTm;
+    if (localtime_r(&nowEpoch, &localTm)) {
+      return DateTime(localTm.tm_year + 1900, localTm.tm_mon + 1,
+                      localTm.tm_mday, localTm.tm_hour,
+                      localTm.tm_min, localTm.tm_sec);
+    }
+  }
+
+  // Rueckfall: bisherige Software-Uhr.
   return softBase + TimeSpan((millis() - softBaseMs) / 1000);
 }
 
@@ -199,6 +249,10 @@ void loadSettings() {
   settings.wifiEnabled    = prefs.getBool("wifi_on", settings.wifiEnabled);
   settings.wifiSSID       = prefs.getString("wifi_ssid", settings.wifiSSID);
   settings.wifiPassword   = prefs.getString("wifi_pass", settings.wifiPassword);
+  settings.timezoneIndex  = prefs.getInt("timezone", settings.timezoneIndex);
+  if (settings.timezoneIndex < 0 || settings.timezoneIndex >= TIMEZONE_COUNT) {
+    settings.timezoneIndex = 0;
+  }
   prefs.end();
 }
 
@@ -422,6 +476,13 @@ void drawDigitalDate(const DateTime& now) {
   img.drawString(buf, 10, screenHeight - 6, 2);
 }
 
+void drawDigitalTime(const DateTime& now) {
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%02d:%02d:%02d",  now.hour(), now.minute(), now.second());
+  img.setTextDatum(TR_DATUM);
+  img.setTextColor(ui.text);
+  img.drawString(buf, screenWidth - 10 , 0, 2);
+}
 // ============================================================
 // Sekundenanzeige auf einer gedachten Ellipse
 //
@@ -587,11 +648,77 @@ void renderFrame() {
   drawMarkers(hourRot, minRot, hCol, mCol);
 
   if (settings.showDate) drawDigitalDate(now);
+  if (settings.showDate) drawDigitalTime(now);
 
   // Sekundenpunkte auf der aeusseren Ellipse
   drawSecondDots(now.second());
 
   img.pushSprite(0, 0);
+}
+
+// ============================================================
+//  NTP-Zeitsynchronisierung
+// ============================================================
+void startNtpSync() {
+  if (rtcOk || WiFi.status() != WL_CONNECTED) return;
+
+  Serial.printf("NTP: Synchronisierung gestartet - Zeitzone: %s\n",
+                TIMEZONES[settings.timezoneIndex].name);
+  configTzTime(TIMEZONES[settings.timezoneIndex].posix,
+               "pool.ntp.org", "time.google.com", "time.cloudflare.com");
+  ntpSyncRequested = true;
+  ntpRequestStartedMs = millis();
+  lastNtpAttemptMs = millis();
+}
+
+void serviceNtp() {
+  if (rtcOk || WiFi.status() != WL_CONNECTED) return;
+
+  // Erster Abgleich sofort; danach etwa alle 12 Stunden erneut anfordern.
+  if (!ntpSyncRequested &&
+      (!ntpTimeValid || millis() - lastNtpAttemptMs >= 12UL * 60UL * 60UL * 1000UL)) {
+    startNtpSync();
+  }
+
+  if (!ntpSyncRequested) return;
+
+  time_t nowEpoch = time(nullptr);
+  struct tm localTm;
+
+  if (localtime_r(&nowEpoch, &localTm) && localTm.tm_year + 1900 >= 2024) {
+    ntpSyncRequested = false;
+    ntpTimeValid = true;
+    lastNtpSyncEpoch = nowEpoch;
+
+    Serial.printf("NTP: OK - %02d.%02d.%04d %02d:%02d:%02d\n",
+                  localTm.tm_mday, localTm.tm_mon + 1, localTm.tm_year + 1900,
+                  localTm.tm_hour, localTm.tm_min, localTm.tm_sec);
+    return;
+  }
+
+  if (millis() - ntpRequestStartedMs >= 15000) {
+    ntpSyncRequested = false;
+    Serial.println("NTP: innerhalb von 15 s keine gueltige Zeit erhalten.");
+  }
+}
+
+String timeSourceText() {
+  if (rtcOk) return "Hardware-RTC";
+  if (ntpTimeValid) return "NTP";
+  return "Software-Uhr";
+}
+
+String lastNtpSyncText() {
+  if (!ntpTimeValid || lastNtpSyncEpoch == 0) return "noch keine";
+
+  struct tm t;
+  if (!localtime_r(&lastNtpSyncEpoch, &t)) return "unbekannt";
+
+  char b[32];
+  snprintf(b, sizeof(b), "%02d.%02d.%04d %02d:%02d:%02d",
+           t.tm_mday, t.tm_mon + 1, t.tm_year + 1900,
+           t.tm_hour, t.tm_min, t.tm_sec);
+  return String(b);
 }
 
 // ============================================================
@@ -679,7 +806,20 @@ void drawInfoScreen() {
   y += 21;
 
   img.setTextColor(TFT_WHITE, TFT_BLACK);
-  img.drawString(rtcOk ? "Hardware-RTC" : "Software-Uhr", 14, y, 2);
+  img.drawString(timeSourceText(), 14, y, 2);
+  y += 19;
+
+  img.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  img.drawString(String("Zone: ") + TIMEZONES[settings.timezoneIndex].name, 14, y, 2);
+  y += 19;
+
+  if (ntpTimeValid) {
+    img.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    img.drawString(String("NTP-Abgleich: ") + lastNtpSyncText(), 14, y, 2);
+  } else if (ntpSyncRequested) {
+    img.setTextColor(TFT_YELLOW, TFT_BLACK);
+    img.drawString("NTP: Synchronisierung ...", 14, y, 2);
+  }
 
   // Hinweis am unteren Rand.
   img.setTextDatum(BC_DATUM);
@@ -796,6 +936,26 @@ void startStationWifi() {
   wifiConnectPending = true;
 }
 
+// WLAN-Aenderungen erst nach Abschluss der HTTP-Antwort anwenden.
+void servicePendingWifiRestart() {
+  if (!wifiRestartPending) return;
+  if ((int32_t)(millis() - wifiRestartAtMs) < 0) return;
+
+  wifiRestartPending = false;
+  wifiConnectPending = false;
+
+  if (!settings.wifiEnabled) {
+    Serial.println("Haus-WLAN: wird deaktiviert.");
+    WiFi.disconnect(false);
+    return;
+  }
+
+  Serial.println("Haus-WLAN: Konfiguration geaendert -> Neuverbindung.");
+  WiFi.disconnect(false);
+  delay(20);
+  startStationWifi();
+}
+
 // Verbindung im Hintergrund ueberwachen, ohne Anzeige/Webserver zu blockieren.
 void serviceStationWifi() {
   if (!settings.wifiEnabled || !wifiConnectPending) return;
@@ -892,6 +1052,18 @@ String buildPage() {
        "<input type=\"password\" name=\"wifi_pass\" value=\"\" maxlength=\"64\" "
        "placeholder=\"Leer lassen = gespeichertes Passwort behalten\" autocomplete=\"new-password\">";
 
+  p += "<label>Zeitzone:</label><select name=\"timezone\">";
+  for (int i = 0; i < TIMEZONE_COUNT; i++) {
+    p += "<option value=\"";
+    p += i;
+    p += "\"";
+    if (i == settings.timezoneIndex) p += " selected";
+    p += ">";
+    p += TIMEZONES[i].name;
+    p += "</option>";
+  }
+  p += "</select>";
+
   p += "<label>Status: ";
   if (!settings.wifiEnabled) {
     p += "deaktiviert";
@@ -919,10 +1091,21 @@ String buildPage() {
   char tb[40];
   snprintf(tb, sizeof(tb), "%02d.%02d.%04d  %02d:%02d:%02d", now.day(), now.month(), now.year(),
            now.hour(), now.minute(), now.second());
-  p += "<div class=\"section\" style=\"margin-top:18px\"><h3>Uhrzeit (RTC)</h3><label>Aktuell: ";
+  p += "<div class=\"section\" style=\"margin-top:18px\"><h3>Uhrzeit &amp; Zeitquelle</h3><label>Aktuell: ";
   p += tb;
-  p += rtcOk ? "" : " (Zeitquelle: Software-Uhr, geht nach Neustart verloren)";
-  p += R"rawliteral(</label>
+  p += "</label><label>Zeitquelle: ";
+  p += timeSourceText();
+  p += "</label><label>Zeitzone: ";
+  p += TIMEZONES[settings.timezoneIndex].name;
+  p += "</label>";
+  if (ntpTimeValid) {
+    p += "<label>Letzter NTP-Abgleich: ";
+    p += lastNtpSyncText();
+    p += "</label>";
+  } else if (ntpSyncRequested) {
+    p += "<label>NTP: Synchronisierung laeuft ...</label>";
+  }
+  p += R"rawliteral(
 <button type="button" class="alt" onclick="syncTime()">Uhrzeit vom Handy uebernehmen</button></div>
 <script>
 function syncTime(){
@@ -980,39 +1163,66 @@ void handleSaveWifi() {
   Serial.println();
   Serial.println("=== POST /savewifi empfangen ===");
 
+  // Alten Zustand merken, damit nur echte WLAN-Aenderungen
+  // eine Trennung/Neuverbindung ausloesen.
+  bool oldWifiEnabled = settings.wifiEnabled;
+  String oldSSID = settings.wifiSSID;
+  int oldTimezoneIndex = settings.timezoneIndex;
+
   settings.wifiEnabled = server.hasArg("wifi_on");
+
+  if (server.hasArg("timezone")) {
+    settings.timezoneIndex =
+        constrain(server.arg("timezone").toInt(), 0, TIMEZONE_COUNT - 1);
+  }
 
   String newSSID = server.hasArg("wifi_ssid") ? server.arg("wifi_ssid") : "";
   newSSID.trim();
   settings.wifiSSID = newSSID;
 
-  // Leer lassen bedeutet: bereits gespeichertes Passwort behalten.
+  // Leeres Passwort bedeutet: vorhandenes Passwort behalten.
   String newPassword = server.hasArg("wifi_pass") ? server.arg("wifi_pass") : "";
-  if (newPassword.length() > 0) {
-    settings.wifiPassword = newPassword;
-  }
+  bool passwordChanged = newPassword.length() > 0;
+  if (passwordChanged) settings.wifiPassword = newPassword;
+
+  bool wifiConfigChanged =
+      (settings.wifiEnabled != oldWifiEnabled) ||
+      (settings.wifiSSID != oldSSID) ||
+      passwordChanged;
+
+  bool timezoneChanged = (settings.timezoneIndex != oldTimezoneIndex);
 
   prefs.begin("fibclock", false);
   prefs.putBool("wifi_on", settings.wifiEnabled);
   prefs.putString("wifi_ssid", settings.wifiSSID);
   prefs.putString("wifi_pass", settings.wifiPassword);
+  prefs.putInt("timezone", settings.timezoneIndex);
   prefs.end();
 
   Serial.printf("  WLAN aktiviert: %s\n", settings.wifiEnabled ? "JA" : "NEIN");
   Serial.printf("  SSID          : %s\n", settings.wifiSSID.c_str());
-  Serial.printf("  Passwort      : %s\n",
-                settings.wifiPassword.length() ? "gespeichert" : "leer");
+  Serial.printf("  Passwort      : %s\n", passwordChanged ? "geaendert" : "unveraendert");
+  Serial.printf("  Zeitzone      : %s\n", TIMEZONES[settings.timezoneIndex].name);
+  Serial.printf("  WLAN-Konfig   : %s\n", wifiConfigChanged ? "GEAENDERT" : "UNVERAENDERT");
+  Serial.printf("  Zeitzone      : %s\n", timezoneChanged ? "GEAENDERT" : "UNVERAENDERT");
 
-  WiFi.disconnect(false);
-  wifiConnectPending = false;
-
-  if (settings.wifiEnabled) {
-    delay(50);
-    startStationWifi();
+  // Zeitzonenwechsel benoetigt neuen NTP-Abgleich, aber KEINE WLAN-Trennung.
+  if (timezoneChanged) {
+    ntpTimeValid = false;
+    ntpSyncRequested = false;
+    lastNtpSyncEpoch = 0;
+    lastNtpAttemptMs = 0;
   }
 
+  // Zuerst HTTP-Antwort abschliessen.
   server.sendHeader("Location", "/", true);
   server.send(303, "text/plain", "WLAN-Einstellungen gespeichert");
+
+  // Nur echte WLAN-Aenderungen spaeter anwenden.
+  if (wifiConfigChanged) {
+    wifiRestartPending = true;
+    wifiRestartAtMs = millis() + 750;
+  }
 }
 
 void handleSetTime() {
@@ -1035,7 +1245,8 @@ void handleNotFound() {
 
   // Browser fragen oft automatisch nach favicon.ico. Das ist kein Fehler.
   if (server.uri() == "/favicon.ico") {
-    server.send(204, "text/plain", "");
+    // Nichtleere Antwort vermeidet "content length is zero".
+    server.send(200, "text/plain", "no favicon");
     return;
   }
 
@@ -1152,6 +1363,10 @@ Serial.println();
   server.on("/save", HTTP_POST, handleSave);
   server.on("/savewifi", HTTP_POST, handleSaveWifi);
   server.on("/settime", HTTP_POST, handleSetTime);
+  // Favicon-Anfrage des Browsers abfangen
+  server.on("/favicon.ico", HTTP_GET, []() {
+      server.send(200, "text/plain", "no favicon");
+  });
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("Webserver gestartet.");
@@ -1165,8 +1380,14 @@ Serial.println();
 void loop() {
   server.handleClient();
 
+  // Echte WLAN-Aenderungen erst nach abgeschlossener HTTP-Antwort anwenden.
+  servicePendingWifiRestart();
+
   // Nicht blockierende Ueberwachung des optionalen Haus-WLANs.
   serviceStationWifi();
+
+  // NTP nur bei bestehender Haus-WLAN-Verbindung betreiben.
+  serviceNtp();
 
   // Touch auswerten und ggf. Infoseite anzeigen/aktualisieren.
   serviceTouchAndInfo();
