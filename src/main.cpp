@@ -33,27 +33,52 @@ static const int PIN_SCL = 19;
 static const char* AP_SSID = "Fibonacci-Clock-Setup";
 static const char* AP_PASS = "retro-fibonacci";   // mind. 8 Zeichen
 
-static const int screenWidth  = 480;   // nach setRotation(1) = Querformat
-static const int screenHeight = 320;
-static const int centerX = screenWidth / 2;
-static const int centerY = screenHeight / 2;
-
-// Goldener Schnitt: b = ln(phi) / (PI/2)  -> Radius waechst pro Vierteldrehung um Faktor 1,618
+// Referenzdesign 480x320; Geometrie wird proportional auf das reale Display skaliert.
+static constexpr float DESIGN_WIDTH = 480.0f;
+static constexpr float DESIGN_HEIGHT = 320.0f;
+int screenWidth=480, screenHeight=320, centerX=240, centerY=160;
 static const float GB = 0.3063487f;
 
-// Radius auf der Achse bei "Skalenanfang" (12:00 oben / 6:00 unten bzw. 0 min rechts / 30 min links)
-// Ueber eine halbe Drehung waechst der Radius um phi^2 = 2,618
-static const float HOUR_R0 = 56.0f;    // -> Skala 56 ... 146 px (senkrecht)
-static const float MIN_R0  = 86.0f;    // -> Skala 86 ... 225 px (waagrecht)
+struct DisplayGeometry {
+  float scale=1.0f, hourR0=56.0f, minR0=86.0f, spiralMaxRadius=290.0f, spiralSegmentPx=6.0f;
+  int axisHalfHeight=152, axisSideMargin=4;
+  int tickMajor=6, tickMinor=3, tickHalfThickness=1;
+  int hourTextOffset=20, minuteTextOffset=17, boldOffset=1;
+  int markerOuter=7, markerInner=5;
+  int secondGlow=5, secondActive=3, secondTrail=2;
+  int edgeMargin=10, dateBottomMargin=6;
+  int particleMinRadius=20, particleMaxRadius=230, particleLargeSize=2;
+} geo;
 
-float aHour, aMin;   // Startradien der beiden Spiralen (werden in setup() berechnet)
+int S(float v) { return max(1, (int)lroundf(v * geo.scale)); }
+float SF(float v) { return v * geo.scale; }
+
+
+
+float aHour, aMin;
 
 // ============================================================
 //  Objekte & Einstellungen
 // ============================================================
 TFT_eSPI    tft      = TFT_eSPI();
 TFT_eSprite img      = TFT_eSprite(&tft);   // Zeichen-Buffer (flimmerfrei)
-TFT_eSprite bgSprite = TFT_eSprite(&tft);   // Hintergrund-Cache (Metall-Textur)
+TFT_eSprite bgSprite = TFT_eSprite(&tft);
+
+void initDisplayGeometry() {
+  screenWidth=tft.width(); screenHeight=tft.height();
+  centerX=screenWidth/2; centerY=screenHeight/2;
+  geo.scale=min(screenWidth/DESIGN_WIDTH, screenHeight/DESIGN_HEIGHT);
+  geo.hourR0=SF(56); geo.minR0=SF(86); geo.spiralMaxRadius=SF(290); geo.spiralSegmentPx=SF(6);
+  geo.axisHalfHeight=S(152); geo.axisSideMargin=S(4);
+  geo.tickMajor=S(6); geo.tickMinor=S(3); geo.tickHalfThickness=S(1);
+  geo.hourTextOffset=S(20); geo.minuteTextOffset=S(17); geo.boldOffset=S(1);
+  geo.markerOuter=S(7); geo.markerInner=S(5);
+  geo.secondGlow=S(5); geo.secondActive=S(3); geo.secondTrail=S(2);
+  geo.edgeMargin=S(10); geo.dateBottomMargin=S(6);
+  geo.particleMinRadius=S(20); geo.particleMaxRadius=S(230); geo.particleLargeSize=S(2);
+  Serial.printf("Display-Geometrie: %dx%d, Skalierung %.3f, Mittelpunkt %d/%d\n", screenWidth, screenHeight, geo.scale, centerX, centerY);
+}
+   // Hintergrund-Cache (Metall-Textur)
 RTC_DS3231  rtc;
 WebServer   server(80);
 Preferences prefs;
@@ -305,7 +330,7 @@ void initBackground() {
 void initParticles() {
   for (int i = 0; i < MAX_PARTICLES; i++) {
     particles[i].angle      = random(0, 360) * (PI / 180.0f);
-    particles[i].radius     = random(20, 230);
+    particles[i].radius     = random(geo.particleMinRadius, geo.particleMaxRadius);
     particles[i].speed      = random(5, 20) / 1000.0f;
     particles[i].brightness = random(80, 230);
   }
@@ -322,7 +347,7 @@ void updateAndDrawParticles() {
     if (x > 0 && x < screenWidth - 1 && y > 0 && y < screenHeight - 1) {
       uint8_t b = particles[i].brightness;
       uint16_t c = dim(tft.color565(b, b, b));
-      if (b > 170) img.fillRect(x, y, 2, 2, c);
+      if (b > 170) img.fillRect(x, y, geo.particleLargeSize, geo.particleLargeSize, c);
       else         img.drawPixel(x, y, c);
     }
   }
@@ -334,22 +359,22 @@ void updateAndDrawParticles() {
 // ============================================================
 void drawClockFace() {
   // Achsen
-  img.drawFastVLine(centerX, centerY - 152, 305, ui.axis);
-  img.drawFastHLine(4, centerY, screenWidth - 8, ui.axis);
+  img.drawFastVLine(centerX, centerY - geo.axisHalfHeight, 2 * geo.axisHalfHeight + 1, ui.axis);
+  img.drawFastHLine(geo.axisSideMargin, centerY, screenWidth - 2 * geo.axisSideMargin, ui.axis);
 
   img.setTextDatum(MC_DATUM);
   img.setTextColor(ui.text);
 
   // --- Stundenskala (senkrecht): 36 Teilstriche pro Haelfte = alle 10 min, Hauptstrich jede Stunde ---
   for (int i = 0; i <= 36; i++) {
-    float r = HOUR_R0 * expf(GB * i * (PI / 36.0f));
+    float r = geo.hourR0 * expf(GB * i * (PI / 36.0f));
     int yUp = centerY - (int)(r + 0.5f);
     int yDn = centerY + (int)(r + 0.5f);
     bool major = (i % 6 == 0);
-    int len = major ? 6 : 3;
+    int len = major ? geo.tickMajor : geo.tickMinor;
     // Hauptstriche jeder vollen Stunde deutlich kraeftiger zeichnen
         if (major) {
-            for (int dy = -1; dy <= 1; dy++) {
+            for (int dy = -geo.tickHalfThickness; dy <= geo.tickHalfThickness; dy++) {
                 img.drawFastHLine(centerX - len, yUp + dy, 2 * len + 1, ui.tick);
                 img.drawFastHLine(centerX - len, yDn + dy, 2 * len + 1, ui.tick);
             }
@@ -364,25 +389,25 @@ void drawClockFace() {
         int hourUp = (n == 0 ? 12 : n);
         int hourDn = n + 6;
 
-        img.drawNumber(hourUp, centerX - 20,     yUp, 2);
-        img.drawNumber(hourUp, centerX - 20 + 1, yUp, 2);
+        img.drawNumber(hourUp, centerX - geo.hourTextOffset, yUp, 2);
+        img.drawNumber(hourUp, centerX - geo.hourTextOffset + geo.boldOffset, yUp, 2);
 
-        img.drawNumber(hourDn, centerX - 20,     yDn, 2);
-        img.drawNumber(hourDn, centerX - 20 + 1, yDn, 2);
+        img.drawNumber(hourDn, centerX - geo.hourTextOffset, yDn, 2);
+        img.drawNumber(hourDn, centerX - geo.hourTextOffset + geo.boldOffset, yDn, 2);
             }
         }
 
   // --- Minutenskala (waagrecht): jede Minute ein Strich, alle 5 min Zahl ---
   for (int i = 0; i <= 30; i++) {
-    float r = MIN_R0 * expf(GB * i * (2.0f * PI / 60.0f));
+    float r = geo.minR0 * expf(GB * i * (2.0f * PI / 60.0f));
     int xR = centerX + (int)(r + 0.5f);
     int xL = centerX - (int)(r + 0.5f);
     bool major = (i % 5 == 0);
-    int len = major ? 6 : 3;
+    int len = major ? geo.tickMajor : geo.tickMinor;
     // Alle 5 Minuten wird der Skalenstrich 3 Pixel breit.
         // Die einzelnen Minuten bleiben 1 Pixel breit.
         if (major) {
-            for (int dx = -1; dx <= 1; dx++) {
+            for (int dx = -geo.tickHalfThickness; dx <= geo.tickHalfThickness; dx++) {
                 img.drawFastVLine(xR + dx, centerY - len, 2 * len + 1, ui.tick);
                 img.drawFastVLine(xL + dx, centerY - len, 2 * len + 1, ui.tick);
             }
@@ -392,11 +417,11 @@ void drawClockFace() {
         }
     if (major) {
       // Minutenbeschriftung leicht kraeftiger darstellen.
-        img.drawNumber(i,      xR,     centerY + 17, 2);
-        img.drawNumber(i,      xR + 1, centerY + 17, 2);
+        img.drawNumber(i,      xR, centerY + geo.minuteTextOffset, 2);
+        img.drawNumber(i,      xR + geo.boldOffset, centerY + geo.minuteTextOffset, 2);
 
-        img.drawNumber(30 + i, xL,     centerY + 17, 2);
-        img.drawNumber(30 + i, xL + 1, centerY + 17, 2);
+        img.drawNumber(30 + i, xL, centerY + geo.minuteTextOffset, 2);
+        img.drawNumber(30 + i, xL + geo.boldOffset, centerY + geo.minuteTextOffset, 2);
             }
   }
 }
@@ -414,7 +439,7 @@ static void strokeSpiral(float rot, float a, float maxR, float width,
 
   while (true) {
     float r = a * expf(GB * theta);
-    theta += constrain(6.0f / r, 0.03f, 0.35f);      // ca. 6 px Segmentlaenge
+    theta += constrain(geo.spiralSegmentPx / r, 0.03f, 0.35f);      // ca. 6 px Segmentlaenge
     r = a * expf(GB * theta);
     if (r > maxR) break;
 
@@ -450,19 +475,19 @@ void drawSpiral(float rot, float a, uint16_t rawColor, float maxR) {
 
 // Markierungspunkt = Schnittpunkt Spirale / Achse (analytisch berechnet)
 void drawMarker(int x, int y, uint16_t rawColor) {
-  img.fillCircle(x, y, 7, ui.text);
-  img.fillCircle(x, y, 5, dim(rawColor));
+  img.fillCircle(x, y, geo.markerOuter, ui.text);
+  img.fillCircle(x, y, geo.markerInner, dim(rawColor));
 }
 
 void drawMarkers(float hourRot, float minRot, uint16_t hCol, uint16_t mCol) {
   // Stunde: erste Haelfte oben (12->6), zweite Haelfte unten (6->12)
   bool hDown = hourRot >= PI;
-  float rh = HOUR_R0 * expf(GB * (hourRot - (hDown ? PI : 0.0f)));
+  float rh = geo.hourR0 * expf(GB * (hourRot - (hDown ? PI : 0.0f)));
   drawMarker(centerX, centerY + (hDown ? 1 : -1) * (int)rh, hCol);
 
   // Minute: erste Haelfte rechts (0->30), zweite Haelfte links (30->60)
   bool mLeft = minRot >= PI;
-  float rm = MIN_R0 * expf(GB * (minRot - (mLeft ? PI : 0.0f)));
+  float rm = geo.minR0 * expf(GB * (minRot - (mLeft ? PI : 0.0f)));
   drawMarker(centerX + (mLeft ? -1 : 1) * (int)rm, centerY, mCol);
 }
 
@@ -473,7 +498,7 @@ void drawDigitalDate(const DateTime& now) {
   snprintf(buf, sizeof(buf), "%s, %02d.%02d.%04d", days[now.dayOfTheWeek()], now.day(), now.month(), now.year());
   img.setTextDatum(BL_DATUM);
   img.setTextColor(ui.text);
-  img.drawString(buf, 10, screenHeight - 6, 2);
+  img.drawString(buf, geo.edgeMargin, screenHeight - geo.dateBottomMargin, 2);
 }
 
 void drawDigitalTime(const DateTime& now) {
@@ -481,7 +506,7 @@ void drawDigitalTime(const DateTime& now) {
   snprintf(buf, sizeof(buf), "%02d:%02d:%02d",  now.hour(), now.minute(), now.second());
   img.setTextDatum(TR_DATUM);
   img.setTextColor(ui.text);
-  img.drawString(buf, screenWidth - 10 , 0, 2);
+  img.drawString(buf, screenWidth - geo.edgeMargin, 0, 2);
 }
 // ============================================================
 // Sekundenanzeige auf einer gedachten Ellipse
@@ -497,8 +522,8 @@ void drawSecondDots(int second)
     // Ellipsenradien direkt aus den vorhandenen Skalen berechnen.
     // Damit folgt der Sekundenring automatisch der Geometrie
     // der Stunden- und Minutenskala.
-    const float radiusX = MIN_R0  * expf(GB * PI);
-    const float radiusY = HOUR_R0 * expf(GB * PI);
+    const float radiusX = geo.minR0 * expf(GB * PI);
+    const float radiusY = geo.hourR0 * expf(GB * PI);
 
     // Start bei 12 Uhr.
     const float startAngle = -PI / 2.0f;
@@ -534,8 +559,8 @@ void drawSecondDots(int second)
                     TFT_BLACK
                 );
 
-            img.fillCircle(x, y, 5, glow);
-            img.fillCircle(x, y, 3, activeColor);
+            img.fillCircle(x, y, geo.secondGlow, glow);
+            img.fillCircle(x, y, geo.secondActive, activeColor);
             img.drawPixel(x, y, TFT_WHITE);
         }
 
@@ -551,7 +576,7 @@ void drawSecondDots(int second)
                     TFT_BLACK
                 );
 
-            img.fillCircle(x, y, 2, trail);
+            img.fillCircle(x, y, geo.secondTrail, trail);
         }
 
         // ----------------------------------------------------
@@ -566,7 +591,7 @@ void drawSecondDots(int second)
                     TFT_BLACK
                 );
 
-            img.fillCircle(x, y, 2, trail);
+            img.fillCircle(x, y, geo.secondTrail, trail);
         }
 
         // ----------------------------------------------------
@@ -594,7 +619,7 @@ void drawSecondDots(int second)
                 img.fillCircle(
                     x,
                     y,
-                    2,
+                    geo.secondTrail,
                     inactiveColor
                 );
             } else {
@@ -643,8 +668,8 @@ void renderFrame() {
     mCol = getCircadianColor(now.hour(), false);
   }
 
-  drawSpiral(hourRot, aHour, hCol, 290.0f);
-  drawSpiral(minRot,  aMin,  mCol, 290.0f);
+  drawSpiral(hourRot, aHour, hCol, geo.spiralMaxRadius);
+  drawSpiral(minRot,  aMin,  mCol, geo.spiralMaxRadius);
   drawMarkers(hourRot, minRot, hCol, mCol);
 
   if (settings.showDate) drawDigitalDate(now);
@@ -1276,8 +1301,7 @@ void setup() {
   loadSettings();
   Serial.println("Einstellungen aus Preferences geladen.");
 
-  aHour = HOUR_R0 / expf(GB * (2.5f * PI));   // Spirale so skaliert, dass der Achsenschnitt bei HOUR_R0 beginnt
-  aMin  = MIN_R0  / expf(GB * (2.0f * PI));
+  // Spiralgeometrie wird nach der Displayinitialisierung berechnet.
 
   // --- RTC (I2C-Pins explizit setzen: Standard-Pins 21/22 sind beim WT32-SC01 vom Display belegt!) ---
   Wire.begin(PIN_SDA, PIN_SCL);
@@ -1334,16 +1358,20 @@ Serial.println();
   tft.fillScreen(TFT_BLACK);
   Serial.println("Display initialisiert: ST7796 ueber SPI, Rotation 1");
 
+  initDisplayGeometry();
+  aHour = geo.hourR0 / expf(GB * (2.5f * PI));
+  aMin  = geo.minR0  / expf(GB * (2.0f * PI));
+
   Serial.printf("PSRAM gefunden: %s\n", psramFound() ? "JA" : "NEIN");
   printMemory("Vor Sprite-Erzeugung");
   if (!psramFound()) fatal("Kein PSRAM gefunden! -BOARD_HAS_PSRAM setzen / PSRAM aktivieren");
   img.setColorDepth(16);
   bgSprite.setColorDepth(16);
   if (!img.createSprite(screenWidth, screenHeight))      fatal("Sprite (img) konnte nicht erzeugt werden");
-  Serial.println("Sprite IMG 480x320x16: OK");
+  Serial.printf("Sprite IMG %dx%dx16: OK\n", screenWidth, screenHeight);
   printMemory("Nach Sprite IMG");
   if (!bgSprite.createSprite(screenWidth, screenHeight)) fatal("Sprite (bg) konnte nicht erzeugt werden");
-  Serial.println("Sprite BG 480x320x16: OK");
+  Serial.printf("Sprite BG %dx%dx16: OK\n", screenWidth, screenHeight);
   printMemory("Nach Sprite BG");
 
   initParticles();
