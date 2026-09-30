@@ -55,7 +55,7 @@ flimmerfrei.
 ### Stunden
 
 Die Stundenspirale wird an der senkrechten Skala abgelesen. Oben liegen
-12 bis 6 Uhr, unten 6 bis 12 Uhr. Volle Stunden besitzen verstärkte
+0 bis 6 Uhr, unten 6 bis 12 Uhr. Volle Stunden besitzen verstärkte
 Skalenstriche.
 
 ### Minuten
