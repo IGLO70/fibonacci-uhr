@@ -3,7 +3,7 @@
 Grafische Fibonacci-Uhr für **WT32-SC01** und **Sunton ESP32-8048S070**
 mit einem gemeinsamen Programmstand.
 
-<video src="Bilder/Sundon-Clip.mp4" width="100%" controls></video>
+![Sundon Clip](Bilder/Sundon-Clip.mp4)
 
 Die Uhr zeigt Stunden und Minuten mit logarithmischen
 Fibonacci-Spiralen. Dazu kommen feste Skalen, eine Sekundenellipse mit
