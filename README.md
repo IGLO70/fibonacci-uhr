@@ -3,13 +3,23 @@
 Grafische Fibonacci-Uhr für **WT32-SC01** und **Sunton ESP32-8048S070**
 mit einem gemeinsamen Programmstand.
 
-![Sundon Clip](Bilder/Sundon-Clip.mp4)
-
 Die Uhr zeigt Stunden und Minuten mit logarithmischen
 Fibonacci-Spiralen. Dazu kommen feste Skalen, eine Sekundenellipse mit
 Leuchtpunkt sowie optional eine digitale Datums- und Zeitanzeige.
 Darstellung, WLAN, NTP und Zeitzone werden über eine Weboberfläche
 konfiguriert.
+
+## Bilder
+
+### WT32
+
+![Fibonacci-Uhr auf WT32-SC01](media/WT32.jpg)
+
+### Sunton ESP32 S3 7"
+
+![Fibonacci-Uhr auf Sunton ESP32-8048S070](media/Sunton-Uhr.jpg)
+
+![Web-Konfiguration der Fibonacci-Uhr](media/sunton-boart.jpg)
 
 ## Unterstützte und getestete Hardware
 
@@ -329,6 +339,12 @@ Erfolgreich getestet auf **beiden Hardwareplattformen**:
 - Zeitzonenwechsel ohne Netzwerkneustart
 - Neustart mit automatischer WLAN- und NTP-Wiederherstellung
 - gemeinsame Font-Abstraktion für TFT_eSPI und LovyanGFX
+
+## Video
+
+Eine kurze Demonstration der Fibonacci-Uhr:
+
+[▶ Demo-Video ansehen](media/Sunton-Clip.mp4)
 
 ## Alternative Hardware -- ungetestet
 
