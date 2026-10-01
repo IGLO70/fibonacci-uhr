@@ -344,7 +344,7 @@ Erfolgreich getestet auf **beiden Hardwareplattformen**:
 
 Eine kurze Demonstration der Fibonacci-Uhr:
 
-[▶ Demo-Video ansehen](media/Sunton-Clip.mp4)
+[▶ Demo-Video ansehen](media/Sunton-Clip-GitHub.mp4)
 
 ## Alternative Hardware -- ungetestet
 
