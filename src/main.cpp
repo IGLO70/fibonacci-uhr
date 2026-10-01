@@ -1,5 +1,5 @@
 /*
-  Fibonacci-Spiralen-Uhr fuer WT32-SC01 (ESP32-WROVER-B, 3.5" 480x320, ST7796 ueber SPI)
+  Fibonacci-Spiralen-Uhr - gemeinsamer Programmstand fuer WT32-SC01 und Sunton ESP32-8048S070
 
   Ablesen der Uhr:
     - Zwei Goldene Spiralen (r = a * e^(b*theta)) drehen sich um die Bildschirmmitte.
@@ -9,26 +9,23 @@
       wandert beim Drehen der Spirale von innen nach aussen und zeigt die Zeit.
 
   Hardware:
-    - Uhrzeit: DS3231-RTC am I2C-Bus (SDA = IO18, SCL = IO19)
+    - Zeitquelle: WT32 optional RTC; Sunton NTP/Software-Uhr
     - Einstellungen: WLAN "Fibonacci-Clock-Setup" -> Browser -> http://192.168.4.1
     - Arduino IDE: diese Datei als FibonacciUhr.ino speichern (Inhalt unveraendert)
 */
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <SPI.h>       // Explizit fuer TFT_eSPI / Adafruit BusIO
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
-#include <TFT_eSPI.h>
+#include "BoardConfig.h"
 #include <RTClib.h>
 #include <time.h>      // ESP32-Systemzeit / NTP
 
 // ============================================================
 //  Konfiguration
 // ============================================================
-static const int PIN_SDA = 18;   // I2C des WT32-SC01 (teilt sich den Bus mit dem Touch-Controller)
-static const int PIN_SCL = 19;
 
 static const char* AP_SSID = "Fibonacci-Clock-Setup";
 static const char* AP_PASS = "retro-fibonacci";   // mind. 8 Zeichen
@@ -48,6 +45,15 @@ struct DisplayGeometry {
   int secondGlow=5, secondActive=3, secondTrail=2;
   int edgeMargin=10, dateBottomMargin=6;
   int particleMinRadius=20, particleMaxRadius=230, particleLargeSize=2;
+
+  // Zentriertes Referenz-Designfeld. Bei abweichendem Seitenverhaeltnis
+  // bleibt die Uhr unverzerrt und erhaelt ggf. freie Raender.
+  int designPixelWidth=480, designPixelHeight=320;
+  int designOffsetX=0, designOffsetY=0;
+
+  // TFT_eSPI-Bitmapfonts koennen nicht stufenlos skaliert werden.
+  // Deshalb werden sinnvolle Fontstufen gewaehlt.
+  uint8_t fontSmall=2, fontLarge=4;
 } geo;
 
 int S(float v) { return max(1, (int)lroundf(v * geo.scale)); }
@@ -60,23 +66,65 @@ float aHour, aMin;
 // ============================================================
 //  Objekte & Einstellungen
 // ============================================================
-TFT_eSPI    tft      = TFT_eSPI();
-TFT_eSprite img      = TFT_eSprite(&tft);   // Zeichen-Buffer (flimmerfrei)
-TFT_eSprite bgSprite = TFT_eSprite(&tft);
+DisplayDevice display;
+DisplaySprite img(&display);       // Zeichen-Buffer (flimmerfrei)
+DisplaySprite bgSprite(&display);  // Hintergrund-Cache
 
 void initDisplayGeometry() {
-  screenWidth=tft.width(); screenHeight=tft.height();
-  centerX=screenWidth/2; centerY=screenHeight/2;
+  screenWidth=display.width();
+  screenHeight=display.height();
+  centerX=screenWidth/2; 
+  centerY=screenHeight/2;
   geo.scale=min(screenWidth/DESIGN_WIDTH, screenHeight/DESIGN_HEIGHT);
-  geo.hourR0=SF(56); geo.minR0=SF(86); geo.spiralMaxRadius=SF(290); geo.spiralSegmentPx=SF(6);
-  geo.axisHalfHeight=S(152); geo.axisSideMargin=S(4);
-  geo.tickMajor=S(6); geo.tickMinor=S(3); geo.tickHalfThickness=S(1);
-  geo.hourTextOffset=S(20); geo.minuteTextOffset=S(17); geo.boldOffset=S(1);
-  geo.markerOuter=S(7); geo.markerInner=S(5);
-  geo.secondGlow=S(5); geo.secondActive=S(3); geo.secondTrail=S(2);
-  geo.edgeMargin=S(10); geo.dateBottomMargin=S(6);
-  geo.particleMinRadius=S(20); geo.particleMaxRadius=S(230); geo.particleLargeSize=S(2);
-  Serial.printf("Display-Geometrie: %dx%d, Skalierung %.3f, Mittelpunkt %d/%d\n", screenWidth, screenHeight, geo.scale, centerX, centerY);
+  geo.hourR0=SF(56); 
+  geo.minR0=SF(86); 
+  geo.spiralMaxRadius=SF(290); 
+  geo.spiralSegmentPx=SF(6);
+  geo.axisHalfHeight=S(152); 
+  geo.axisSideMargin=S(4);
+  geo.tickMajor=S(6); 
+  geo.tickMinor=S(3);
+
+  // Hauptstriche bleiben optisch 3 Pixel dick.
+  // Nur ihre Laenge wird mit der Displaygeometrie skaliert.
+  geo.tickHalfThickness=1;
+  geo.hourTextOffset=S(20); 
+  geo.minuteTextOffset=S(17);
+
+  // Optischer Fett-Effekt: bewusst NICHT skalieren.
+  // Zwei Pixel wirken auf grossen Fonts bereits wie ein Schatten.
+  geo.boldOffset=1;
+  geo.markerOuter=7; 
+  geo.markerInner=5;
+  geo.secondGlow=S(5); 
+  geo.secondActive=S(3); 
+  geo.secondTrail=S(2);
+  geo.edgeMargin=S(10); 
+  geo.dateBottomMargin=S(6);
+  geo.particleMinRadius=S(20); 
+  geo.particleMaxRadius=S(230); 
+  geo.particleLargeSize=S(2);
+
+  geo.designPixelWidth  = (int)lroundf(DESIGN_WIDTH * geo.scale);
+  geo.designPixelHeight = (int)lroundf(DESIGN_HEIGHT * geo.scale);
+  geo.designOffsetX = (screenWidth  - geo.designPixelWidth) / 2;
+  geo.designOffsetY = (screenHeight - geo.designPixelHeight) / 2;
+
+  // Schriftgroessen stufenweise an groessere Displays anpassen.
+  if (geo.scale >= 1.55f) {
+    geo.fontSmall = 4;
+    geo.fontLarge = 6;
+  } else {
+    geo.fontSmall = 2;
+    geo.fontLarge = 4;
+  }
+
+  Serial.printf("Display-Geometrie: %dx%d, Skalierung %.3f, Mittelpunkt %d/%d\n",
+                screenWidth, screenHeight, geo.scale, centerX, centerY);
+  Serial.printf("Designfeld: %dx%d, Offset %d/%d, Fonts %u/%u\n",
+                geo.designPixelWidth, geo.designPixelHeight,
+                geo.designOffsetX, geo.designOffsetY,
+                geo.fontSmall, geo.fontLarge);
 }
    // Hintergrund-Cache (Metall-Textur)
 RTC_DS3231  rtc;
@@ -146,9 +194,7 @@ static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 bool wifiRestartPending = false;
 uint32_t wifiRestartAtMs = 0;
 
-// Touchcontroller des WT32-SC01 (FT6336U/FT6x36-kompatibel).
-static const uint8_t TOUCH_I2C_ADDR = 0x38;
-static const uint8_t TOUCH_REG_TD_STATUS = 0x02;
+// Touch wird beim Sunton direkt von LovyanGFX / GT911 verwaltet.
 
 // Infoseite: beim Start und nach Antippen 10 Sekunden sichtbar.
 bool infoScreenActive = true;
@@ -167,7 +213,7 @@ struct Particle { float angle; float radius; float speed; uint8_t brightness; } 
 //  Hilfsfunktionen: Farben
 // ============================================================
 uint16_t rgb888to565(uint32_t c) {
-  return tft.color565((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+  return display.color565((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
 }
 
 // Helligkeit einer RGB565-Farbe in Prozent anpassen
@@ -182,15 +228,40 @@ uint16_t applyBrightness(uint16_t color, int percent) {
   return (r << 11) | (g << 5) | b;
 }
 
+// ------------------------------------------------------------
+// RGB565 Alpha-Blending, unabhaengig von TFT_eSPI/LovyanGFX.
+//
+// alpha = 255 -> Vordergrund voll sichtbar
+// alpha =   0 -> Hintergrund voll sichtbar
+// ------------------------------------------------------------
+uint16_t alphaBlend565(uint8_t alpha, uint16_t fg, uint16_t bg)
+{
+    uint32_t inv = 255U - alpha;
+
+    uint32_t fr = (fg >> 11) & 0x1F;
+    uint32_t fg6 = (fg >> 5) & 0x3F;
+    uint32_t fb = fg & 0x1F;
+
+    uint32_t br = (bg >> 11) & 0x1F;
+    uint32_t bg6 = (bg >> 5) & 0x3F;
+    uint32_t bb = bg & 0x1F;
+
+    uint32_t r = (fr * alpha + br * inv + 127U) / 255U;
+    uint32_t g = (fg6 * alpha + bg6 * inv + 127U) / 255U;
+    uint32_t b = (fb * alpha + bb * inv + 127U) / 255U;
+
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
 inline uint16_t dim(uint16_t c) { return applyBrightness(c, settings.brightness); }
 
 // Feature 1: Farben abhaengig von der Tageszeit
 uint16_t getCircadianColor(int hour, bool isHourSpiral) {
   if (hour >= 6 && hour < 18) {   // Tag: kuehle Farben
-    return isHourSpiral ? tft.color565(230, 240, 255) : tft.color565(0, 191, 255);
+    return isHourSpiral ? display.color565(230, 240, 255) : display.color565(0, 191, 255);
   }
   // Abend/Nacht: warme, augenschonende Toene
-  return isHourSpiral ? tft.color565(255, 140, 0) : tft.color565(180, 0, 0);
+  return isHourSpiral ? display.color565(255, 140, 0) : display.color565(180, 0, 0);
 }
 
 // ------------------------------------------------------------
@@ -207,17 +278,17 @@ void updateUiColors()
     {
         // Gebuerstetes Metall:
         // dunkle, aber deutlich sichtbare Beschriftung
-        ui.axis = tft.color565(35, 35, 40);
-        ui.tick = tft.color565(20, 20, 24);
-        ui.text = tft.color565(5, 5, 8);
+        ui.axis = display.color565(35, 35, 40);
+        ui.tick = display.color565(20, 20, 24);
+        ui.text = display.color565(5, 5, 8);
     }
     else
     {
         // Schwarzer Hintergrund:
         // helle Skalen und Beschriftungen
-        ui.axis = tft.color565(100, 100, 105);
-        ui.tick = tft.color565(190, 190, 195);
-        ui.text = tft.color565(235, 235, 240);
+        ui.axis = display.color565(100, 100, 105);
+        ui.tick = display.color565(190, 190, 195);
+        ui.text = display.color565(235, 235, 240);
     }
 }
 
@@ -317,7 +388,7 @@ void initBackground() {
       v = (int)(v * (1.0f - 0.45f * d * d));     // Vignette: Ecken dunkler
       v = constrain(v * settings.brightness / 100, 0, 255);
       int vb = constrain(v + 4, 0, 255);         // leichter Blaustich wie Stahl
-      bgSprite.drawFastHLine(x, y, len, tft.color565(v, v, vb));
+      bgSprite.drawFastHLine(x, y, len, display.color565(v, v, vb));
       x += len;
     }
   }
@@ -346,7 +417,7 @@ void updateAndDrawParticles() {
 
     if (x > 0 && x < screenWidth - 1 && y > 0 && y < screenHeight - 1) {
       uint8_t b = particles[i].brightness;
-      uint16_t c = dim(tft.color565(b, b, b));
+      uint16_t c = dim(display.color565(b, b, b));
       if (b > 170) img.fillRect(x, y, geo.particleLargeSize, geo.particleLargeSize, c);
       else         img.drawPixel(x, y, c);
     }
@@ -357,7 +428,11 @@ void updateAndDrawParticles() {
 //  Zifferblatt: feste Achsen und Skalen
 //  Skalenposition = Radius, an dem die Spirale die Achse kreuzt, wenn die Uhr genau diese Zeit zeigt.
 // ============================================================
-void drawClockFace() {
+void drawClockFace(int currentHour) {
+  // Die Spirale bleibt eine 12-Stunden-Spirale.
+  // Nur die Beschriftung wechselt automatisch zwischen
+  // 00-12 Uhr und 12-24 Uhr.
+  const bool afternoon = currentHour >= 12;
   // Achsen
   img.drawFastVLine(centerX, centerY - geo.axisHalfHeight, 2 * geo.axisHalfHeight + 1, ui.axis);
   img.drawFastHLine(geo.axisSideMargin, centerY, screenWidth - 2 * geo.axisSideMargin, ui.axis);
@@ -386,14 +461,17 @@ void drawClockFace() {
       int n = i / 6;                          // 0..6
       // Stundenbeschriftung leicht "fett" zeichnen.
         // Zweiter Aufruf um 1 Pixel versetzt.
-        int hourUp = (n == 0 ? 12 : n);
-        int hourDn = n + 6;
+        // Vormittag:  0..6 oben,  6..12 unten
+        // Nachmittag: 12..18 oben, 18..24 unten
+        // 24 ist die Endmarke; nach 23:59:59 beginnt wieder 0.
+        int hourUp = afternoon ? (n + 12) : n;
+        int hourDn = afternoon ? (n + 18) : (n + 6);
 
-        img.drawNumber(hourUp, centerX - geo.hourTextOffset, yUp, 2);
-        img.drawNumber(hourUp, centerX - geo.hourTextOffset + geo.boldOffset, yUp, 2);
+        boardDrawNumber(img, hourUp, centerX - geo.hourTextOffset, yUp, geo.fontSmall);
+        boardDrawNumber(img, hourUp, centerX - geo.hourTextOffset + geo.boldOffset, yUp, geo.fontSmall);
 
-        img.drawNumber(hourDn, centerX - geo.hourTextOffset, yDn, 2);
-        img.drawNumber(hourDn, centerX - geo.hourTextOffset + geo.boldOffset, yDn, 2);
+        boardDrawNumber(img, hourDn, centerX - geo.hourTextOffset, yDn, geo.fontSmall);
+        boardDrawNumber(img, hourDn, centerX - geo.hourTextOffset + geo.boldOffset, yDn, geo.fontSmall);
             }
         }
 
@@ -417,11 +495,11 @@ void drawClockFace() {
         }
     if (major) {
       // Minutenbeschriftung leicht kraeftiger darstellen.
-        img.drawNumber(i,      xR, centerY + geo.minuteTextOffset, 2);
-        img.drawNumber(i,      xR + geo.boldOffset, centerY + geo.minuteTextOffset, 2);
+        boardDrawNumber(img, i,      xR, centerY + geo.minuteTextOffset, geo.fontSmall);
+        boardDrawNumber(img, i,      xR + geo.boldOffset, centerY + geo.minuteTextOffset, geo.fontSmall);
 
-        img.drawNumber(30 + i, xL, centerY + geo.minuteTextOffset, 2);
-        img.drawNumber(30 + i, xL + geo.boldOffset, centerY + geo.minuteTextOffset, 2);
+        boardDrawNumber(img, 30 + i, xL, centerY + geo.minuteTextOffset, geo.fontSmall);
+        boardDrawNumber(img, 30 + i, xL + geo.boldOffset, centerY + geo.minuteTextOffset, geo.fontSmall);
             }
   }
 }
@@ -450,7 +528,7 @@ static void strokeSpiral(float rot, float a, float maxR, float width,
     uint16_t c = color;
     if (gradient) {   // Farbverlauf entlang der Spirale
       uint8_t alpha = (uint8_t)constrain(255 - (int)(theta * 14.0f), 40, 255);
-      c = tft.alphaBlend(alpha, color, color2);
+      c = alphaBlend565(alpha, color, color2);
     }
     img.drawWideLine(x0, y0, x1, y1, width, c);
     x0 = x1; y0 = y1;
@@ -459,13 +537,24 @@ static void strokeSpiral(float rot, float a, float maxR, float width,
 
 void drawSpiral(float rot, float a, uint16_t rawColor, float maxR) {
   const uint16_t base = dim(rawColor);
+  // Linienstaerke ist ein optischer Wert und wird NICHT mit der
+  // Displaygroesse skaliert. Die Web-Einstellung 1..5 bleibt dadurch
+  // auf kleinen und grossen Displays vergleichbar.
   const float t = (float)settings.thickness;
 
-  if (settings.effectType == 1) {                    // Neon-Glow: mehrere Schichten
-    strokeSpiral(rot, a, maxR, t + 9.0f, tft.alphaBlend(35,  base, TFT_BLACK), false, 0);
-    strokeSpiral(rot, a, maxR, t + 5.0f, tft.alphaBlend(85,  base, TFT_BLACK), false, 0);
-    strokeSpiral(rot, a, maxR, t + 2.0f, tft.alphaBlend(160, base, TFT_BLACK), false, 0);
-    strokeSpiral(rot, a, maxR, t,        base, false, 0);
+  if (settings.effectType == 1) {
+#if defined(BOARD_WT32_SC01)
+    // Bewaehrter WT32-Neon-Effekt.
+    strokeSpiral(rot, a, maxR, t + 9.0f, alphaBlend565(35,  base, TFT_BLACK), false, 0);
+    strokeSpiral(rot, a, maxR, t + 5.0f, alphaBlend565(85,  base, TFT_BLACK), false, 0);
+    strokeSpiral(rot, a, maxR, t + 2.0f, alphaBlend565(160, base, TFT_BLACK), false, 0);
+    strokeSpiral(rot, a, maxR, t, base, false, 0);
+#else
+    // Sunton: schmale Neonroehre ohne dunkle Aussenkontur.
+    uint16_t neonCore = alphaBlend565(180, TFT_WHITE, base);
+    strokeSpiral(rot, a, maxR, t + 2.0f, base, false, 0);
+    strokeSpiral(rot, a, maxR, t, neonCore, false, 0);
+#endif
   } else if (settings.effectType == 2) {             // Farbverlauf
     strokeSpiral(rot, a, maxR, t, base, true, dim(TFT_MAGENTA));
   } else {                                           // Klassisch
@@ -498,7 +587,7 @@ void drawDigitalDate(const DateTime& now) {
   snprintf(buf, sizeof(buf), "%s, %02d.%02d.%04d", days[now.dayOfTheWeek()], now.day(), now.month(), now.year());
   img.setTextDatum(BL_DATUM);
   img.setTextColor(ui.text);
-  img.drawString(buf, geo.edgeMargin, screenHeight - geo.dateBottomMargin, 2);
+  boardDrawString(img, buf, geo.edgeMargin, screenHeight - geo.dateBottomMargin, geo.fontSmall);
 }
 
 void drawDigitalTime(const DateTime& now) {
@@ -506,7 +595,7 @@ void drawDigitalTime(const DateTime& now) {
   snprintf(buf, sizeof(buf), "%02d:%02d:%02d",  now.hour(), now.minute(), now.second());
   img.setTextDatum(TR_DATUM);
   img.setTextColor(ui.text);
-  img.drawString(buf, screenWidth - geo.edgeMargin, 0, 2);
+  boardDrawString(img, buf, screenWidth - geo.edgeMargin, 0, geo.fontSmall);
 }
 // ============================================================
 // Sekundenanzeige auf einer gedachten Ellipse
@@ -529,7 +618,7 @@ void drawSecondDots(int second)
     const float startAngle = -PI / 2.0f;
 
     // Grundfarbe der inaktiven Sekundenpunkte.
-    uint16_t inactiveColor = tft.color565(55, 55, 60);
+    uint16_t inactiveColor = display.color565(55, 55, 60);
 
     // Leuchtfarbe des aktuellen Sekundenpunktes.
     uint16_t activeColor = rgb888to565(settings.secondRGB);
@@ -553,7 +642,7 @@ void drawSecondDots(int second)
 
             // Schwacher Glow
             uint16_t glow =
-                tft.alphaBlend(
+                alphaBlend565(
                     90,
                     activeColor,
                     TFT_BLACK
@@ -570,7 +659,7 @@ void drawSecondDots(int second)
         else if (s == (second + 59) % 60) {
 
             uint16_t trail =
-                tft.alphaBlend(
+                alphaBlend565(
                     150,
                     activeColor,
                     TFT_BLACK
@@ -585,7 +674,7 @@ void drawSecondDots(int second)
         else if (s == (second + 58) % 60) {
 
             uint16_t trail =
-                tft.alphaBlend(
+                alphaBlend565(
                     90,
                     activeColor,
                     TFT_BLACK
@@ -600,7 +689,7 @@ void drawSecondDots(int second)
         else if (s == (second + 57) % 60) {
 
             uint16_t trail =
-                tft.alphaBlend(
+                alphaBlend565(
                     50,
                     activeColor,
                     TFT_BLACK
@@ -647,12 +736,20 @@ void renderFrame() {
   }
   updateUiColors();
 
-  if (settings.backgroundType == 1) bgSprite.pushToSprite(&img, 0, 0);
-  else                              img.fillSprite(TFT_BLACK);
+  if (settings.backgroundType == 1) {
+#if defined(BOARD_WT32_SC01)
+    bgSprite.pushToSprite(&img, 0, 0);
+#else
+    img.pushImage(0, 0, screenWidth, screenHeight,
+                  (uint16_t*)bgSprite.getBuffer());
+#endif
+  } else {
+    img.fillSprite(TFT_BLACK);
+  }
 
   if (settings.particleEffect) updateAndDrawParticles();
 
-  drawClockFace();
+  drawClockFace(now.hour());
 
   
 
@@ -753,14 +850,19 @@ String lastNtpSyncText() {
 // Nur die Anzahl der Beruehrungspunkte lesen.
 // Fuer "irgendwo antippen" brauchen wir keine kalibrierten X/Y-Koordinaten.
 bool isDisplayTouched() {
-  Wire.beginTransmission(TOUCH_I2C_ADDR);
-  Wire.write(TOUCH_REG_TD_STATUS);
+#if defined(BOARD_WT32_SC01)
+  // WT32: FT6x36-kompatibler Touchcontroller direkt ueber I2C.
+  Wire.beginTransmission(BOARD_TOUCH_ADDR);
+  Wire.write(BOARD_TOUCH_STATUS_REG);
   if (Wire.endTransmission(false) != 0) return false;
-
-  if (Wire.requestFrom((uint8_t)TOUCH_I2C_ADDR, (uint8_t)1) != 1) return false;
-
+  if (Wire.requestFrom((uint8_t)BOARD_TOUCH_ADDR, (uint8_t)1) != 1) return false;
   uint8_t touches = Wire.read() & 0x0F;
   return touches > 0 && touches <= 2;
+#else
+  // Sunton: GT911 wird von LovyanGFX verwaltet.
+  uint16_t x = 0, y = 0;
+  return display.getTouch(&x, &y);
+#endif
 }
 
 // Infoseite aktivieren bzw. die 10-Sekunden-Frist neu starten.
@@ -780,77 +882,77 @@ void drawInfoScreen() {
   img.fillSprite(TFT_BLACK);
   img.setTextDatum(TL_DATUM);
 
-  int y = 12;
+  int y = geo.designOffsetY + S(12);
   img.setTextColor(TFT_CYAN, TFT_BLACK);
-  img.drawString("Fibonacci Spiralen-Uhr", 14, y, 4);
-  y += 44;
+  boardDrawString(img, "Fibonacci Spiralen-Uhr", geo.designOffsetX + S(14), y, geo.fontLarge);
+  y += S(44);
 
   img.setTextColor(TFT_YELLOW, TFT_BLACK);
-  img.drawString("Setup-WLAN", 14, y, 2);
-  y += 21;
+  boardDrawString(img, "Setup-WLAN", geo.designOffsetX + S(14), y, geo.fontSmall);
+  y += S(21);
 
   img.setTextColor(TFT_WHITE, TFT_BLACK);
-  img.drawString(String("SSID: ") + AP_SSID, 14, y, 2);
-  y += 19;
-  img.drawString(String("IP:   ") + WiFi.softAPIP().toString(), 14, y, 2);
-  y += 27;
+  boardDrawString(img, String("SSID: ") + AP_SSID, geo.designOffsetX + S(14), y, geo.fontSmall);
+  y += S(19);
+  boardDrawString(img, String("IP:   ") + WiFi.softAPIP().toString(), geo.designOffsetX + S(14), y, geo.fontSmall);
+  y += S(27);
 
   img.setTextColor(TFT_YELLOW, TFT_BLACK);
-  img.drawString("Haus-WLAN", 14, y, 2);
-  y += 21;
+  boardDrawString(img, "Haus-WLAN", geo.designOffsetX + S(14), y, geo.fontSmall);
+  y += S(21);
 
   img.setTextColor(TFT_WHITE, TFT_BLACK);
   if (!settings.wifiEnabled) {
-    img.drawString("Deaktiviert", 14, y, 2);
-    y += 19;
+    boardDrawString(img, "Deaktiviert", geo.designOffsetX + S(14), y, geo.fontSmall);
+    y += S(19);
   } else {
-    img.drawString(String("SSID: ") + settings.wifiSSID, 14, y, 2);
-    y += 19;
+    boardDrawString(img, String("SSID: ") + settings.wifiSSID, geo.designOffsetX + S(14), y, geo.fontSmall);
+    y += S(19);
 
     if (WiFi.status() == WL_CONNECTED) {
       img.setTextColor(TFT_GREEN, TFT_BLACK);
-      img.drawString("Status: Verbunden", 14, y, 2);
-      y += 19;
+      boardDrawString(img, "Status: Verbunden", geo.designOffsetX + S(14), y, geo.fontSmall);
+      y += S(19);
       img.setTextColor(TFT_WHITE, TFT_BLACK);
-      img.drawString(String("IP:     ") + WiFi.localIP().toString(), 14, y, 2);
-      y += 19;
+      boardDrawString(img, String("IP:     ") + WiFi.localIP().toString(), geo.designOffsetX + S(14), y, geo.fontSmall);
+      y += S(19);
     } else if (wifiConnectPending) {
       img.setTextColor(TFT_YELLOW, TFT_BLACK);
-      img.drawString("Status: Verbindung wird hergestellt ...", 14, y, 2);
-      y += 19;
+      boardDrawString(img, "Status: Verbindung wird hergestellt ...", geo.designOffsetX + S(14), y, geo.fontSmall);
+      y += S(19);
     } else {
       img.setTextColor(TFT_RED, TFT_BLACK);
-      img.drawString("Status: Nicht verbunden", 14, y, 2);
-      y += 19;
+      boardDrawString(img, "Status: Nicht verbunden", geo.designOffsetX + S(14), y, geo.fontSmall);
+      y += S(19);
     }
   }
 
-  y += 8;
+  y += S(8);
   img.setTextColor(TFT_YELLOW, TFT_BLACK);
-  img.drawString("Zeitquelle", 14, y, 2);
-  y += 21;
+  boardDrawString(img, "Zeitquelle", geo.designOffsetX + S(14), y, geo.fontSmall);
+  y += S(21);
 
   img.setTextColor(TFT_WHITE, TFT_BLACK);
-  img.drawString(timeSourceText(), 14, y, 2);
-  y += 19;
+  boardDrawString(img, timeSourceText(), geo.designOffsetX + S(14), y, geo.fontSmall);
+  y += S(19);
 
   img.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  img.drawString(String("Zone: ") + TIMEZONES[settings.timezoneIndex].name, 14, y, 2);
-  y += 19;
+  boardDrawString(img, String("Zone: ") + TIMEZONES[settings.timezoneIndex].name, geo.designOffsetX + S(14), y, geo.fontSmall);
+  y += S(19);
 
   if (ntpTimeValid) {
     img.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    img.drawString(String("NTP-Abgleich: ") + lastNtpSyncText(), 14, y, 2);
+    boardDrawString(img, String("NTP-Abgleich: ") + lastNtpSyncText(), geo.designOffsetX + S(14), y, geo.fontSmall);
   } else if (ntpSyncRequested) {
     img.setTextColor(TFT_YELLOW, TFT_BLACK);
-    img.drawString("NTP: Synchronisierung ...", 14, y, 2);
+    boardDrawString(img, "NTP: Synchronisierung ...", geo.designOffsetX + S(14), y, geo.fontSmall);
   }
 
   // Hinweis am unteren Rand.
   img.setTextDatum(BC_DATUM);
   img.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  img.drawString("Display antippen: Info fuer 10 Sekunden",
-                 screenWidth / 2, screenHeight - 7, 2);
+  boardDrawString(img, "Display antippen: Info fuer 10 Sekunden",
+                 screenWidth / 2, screenHeight - S(7), geo.fontSmall);
 
   // Erst jetzt das komplett fertige Bild sichtbar machen.
   img.pushSprite(0, 0);
@@ -1284,10 +1386,10 @@ void handleNotFound() {
 // ============================================================
 void fatal(const char* msg) {
   Serial.println(msg);
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString(msg, 10, 10, 2);
+  display.fillScreen(TFT_BLACK);
+  display.setTextDatum(TL_DATUM);
+  display.setTextColor(TFT_RED, TFT_BLACK);
+  boardDrawString(display, msg, 10, 10, 2);
   while (true) delay(1000);
 }
 
@@ -1303,60 +1405,34 @@ void setup() {
 
   // Spiralgeometrie wird nach der Displayinitialisierung berechnet.
 
-  // --- RTC (I2C-Pins explizit setzen: Standard-Pins 21/22 sind beim WT32-SC01 vom Display belegt!) ---
-  Wire.begin(PIN_SDA, PIN_SCL);
-
-  // ------------------------------------------------------------
-// I2C-Bus durchsuchen.
-// Damit sehen wir, welche I2C-Bausteine auf SDA=18 / SCL=19
-// tatsaechlich antworten.
-// ------------------------------------------------------------
-Serial.println();
-Serial.println("I2C-Scan auf SDA=18 / SCL=19:");
-
-int found = 0;
-
-for (uint8_t address = 1; address < 127; address++)
-{
-    Wire.beginTransmission(address);
-    uint8_t error = Wire.endTransmission();
-
-    if (error == 0)
-    {
-        Serial.printf(
-            "  I2C-Geraet gefunden: 0x%02X\n",
-            address
-        );
-
-        found++;
-    }
-}
-
-if (found == 0)
-{
-    Serial.println("  KEIN I2C-Geraet gefunden!");
-}
-else
-{
-    Serial.printf("  Insgesamt %d I2C-Geraet(e) gefunden.\n", found);
-}
-
-Serial.println();  
-
+  // --- Zeitbasis und Display: boardspezifisch ---
+#if defined(BOARD_WT32_SC01)
+  Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
   rtcOk = rtc.begin(&Wire);
   Serial.printf("RTC DS3231: %s\n", rtcOk ? "OK" : "NICHT GEFUNDEN");
   softBase = DateTime(F(__DATE__), F(__TIME__));
   softBaseMs = millis();
   if (rtcOk && rtc.lostPower()) {
-    Serial.println("RTC hatte keinen Strom - setze Kompilierzeit (bitte ueber die Webseite korrigieren)");
+    Serial.println("RTC hatte keinen Strom - setze Kompilierzeit");
     rtc.adjust(softBase);
   }
-
-  // --- Display ---
-  tft.init();
-  tft.setRotation(1);          // Querformat; falls das Bild auf dem Kopf steht: 3
-  tft.fillScreen(TFT_BLACK);
-  Serial.println("Display initialisiert: ST7796 ueber SPI, Rotation 1");
+  display.init();
+  display.setRotation(1);
+  display.fillScreen(TFT_BLACK);
+  Serial.println("Display initialisiert: WT32-SC01 / ST7796 SPI / Rotation 1");
+#else
+  rtcOk = false;
+  softBase = DateTime(F(__DATE__), F(__TIME__));
+  softBaseMs = millis();
+  Serial.println("RTC: nicht verwendet - Zeitquelle Software-Uhr / NTP");
+  pinMode(BOARD_BACKLIGHT_PIN, OUTPUT);
+  digitalWrite(BOARD_BACKLIGHT_PIN, HIGH);
+  display.init();
+  display.setRotation(0);
+  display.fillScreen(TFT_BLACK);
+  Serial.println("Display initialisiert: Sunton RGB 800x480 / LovyanGFX");
+#endif
+  Serial.printf("Hardwareprofil: %s\n", BOARD_NAME);
 
   initDisplayGeometry();
   aHour = geo.hourR0 / expf(GB * (2.5f * PI));
@@ -1365,8 +1441,29 @@ Serial.println();
   Serial.printf("PSRAM gefunden: %s\n", psramFound() ? "JA" : "NEIN");
   printMemory("Vor Sprite-Erzeugung");
   if (!psramFound()) fatal("Kein PSRAM gefunden! -BOARD_HAS_PSRAM setzen / PSRAM aktivieren");
+
+  // Speicherbedarf der zwei 16-Bit-Vollbild-Sprites vorab berechnen.
+  const size_t spriteBytes = (size_t)screenWidth * (size_t)screenHeight * 2U;
+  const size_t twoSpriteBytes = spriteBytes * 2U;
+  const size_t psramFreeBeforeSprites = ESP.getFreePsram();
+  const size_t safetyReserve = 256U * 1024U;
+
+  Serial.printf("Sprite-Speicher pro Bild : %u Bytes\n", (unsigned)spriteBytes);
+  Serial.printf("Sprite-Speicher fuer 2   : %u Bytes\n", (unsigned)twoSpriteBytes);
+  Serial.printf("PSRAM Sicherheitsreserve : %u Bytes\n", (unsigned)safetyReserve);
+
+  if (psramFreeBeforeSprites < twoSpriteBytes + safetyReserve) {
+    fatal("Zu wenig PSRAM fuer zwei Vollbild-Sprites");
+  }
+
   img.setColorDepth(16);
   bgSprite.setColorDepth(16);
+
+#if defined(BOARD_SUNTON_8048S070)
+  // LovyanGFX: Vollbild-Sprites bevorzugt im 8-MB-PSRAM anlegen.
+  img.setPsram(true);
+  bgSprite.setPsram(true);
+#endif
   if (!img.createSprite(screenWidth, screenHeight))      fatal("Sprite (img) konnte nicht erzeugt werden");
   Serial.printf("Sprite IMG %dx%dx16: OK\n", screenWidth, screenHeight);
   printMemory("Nach Sprite IMG");
@@ -1423,7 +1520,7 @@ void loop() {
   // Solange die Infoseite aktiv ist, darf die Uhr sie nicht ueberzeichnen.
   if (!infoScreenActive) {
     static uint32_t lastFrame = 0;
-    if (millis() - lastFrame >= 30) {
+    if (millis() - lastFrame >= DISPLAY_FRAME_INTERVAL_MS) {
       lastFrame = millis();
       renderFrame();
     }

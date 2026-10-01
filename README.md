@@ -1,62 +1,173 @@
-# Fibonacci-Spiralen-Uhr für WT32-SC01
+# Fibonacci-Spiralen-Uhr -- Multi-Board
 
-Grafische Fibonacci-Uhr für das **WT32-SC01** mit ESP32-WROVER-B und
-3,5"-ST7796-Display (480 × 320).
+Grafische Fibonacci-Uhr für **WT32-SC01** und **Sunton ESP32-8048S070**
+mit einem gemeinsamen Programmstand.
 
-Die Uhr zeigt Stunden und Minuten mit logarithmischen Spiralen. Dazu
-kommen feste Skalen, eine Sekundenellipse mit Leuchtpunkt sowie optional
-eine digitale Datums- und Zeitanzeige. Darstellung, WLAN, NTP und
-Zeitzone werden über eine Weboberfläche konfiguriert.
+<video src="Bilder/Sundon-Clip.mp4" width="100%" controls></video>
 
-## Hardware
+Die Uhr zeigt Stunden und Minuten mit logarithmischen
+Fibonacci-Spiralen. Dazu kommen feste Skalen, eine Sekundenellipse mit
+Leuchtpunkt sowie optional eine digitale Datums- und Zeitanzeige.
+Darstellung, WLAN, NTP und Zeitzone werden über eine Weboberfläche
+konfiguriert.
 
-- WT32-SC01 mit ESP32-WROVER-B
-- ST7796 über SPI
+## Unterstützte und getestete Hardware
+
+### WT32-SC01
+
+- ESP32-WROVER-B
+- 3,5"-ST7796-Display, 480 × 320
+- TFT_eSPI über SPI
 - PSRAM
 - Touchcontroller auf I²C-Adresse `0x38`
-- WT32-SC01 Extension-Platine Version 1.2
+- SDA GPIO18 / SCL GPIO19
+- optionale DS3231-RTC
+- Renderintervall 30 ms
+- eigener, für das WT32 abgestimmter Neon-Effekt
 
-### RTC
+Bei der getesteten WT32-SC01 Extension-Platine Version 1.2 ist der
+RTC-Bestückungsplatz U10 nicht bestückt. Beim Test wurde am I²C-Bus nur
+der Touchcontroller auf `0x38` gefunden. Ohne externe RTC ist NTP die
+normale Zeitquelle; alternativ kann die Uhrzeit vom Smartphone
+übernommen werden.
 
-Bei der verwendeten Extension-Platine V1.2 ist der RTC-Bestückungsplatz
-**U10 nicht bestückt**. Beim I²C-Scan wurde nur der Touchcontroller auf
-`0x38` gefunden. Die normale Zeitquelle ist daher NTP. Alternativ kann
-die Uhrzeit vom Smartphone übernommen werden.
+### Sunton ESP32-8048S070
 
-## Software und PlatformIO
+- ESP32-S3-WROOM, N16R8
+- 7"-RGB-Display, 800 × 480
+- LovyanGFX
+- 8 MB PSRAM
+- GT911-Touch
+- Touch-I²C: SDA GPIO19 / SCL GPIO20
+- GT911-Adresse `0x5D`
+- Touch-Reset GPIO38
+- Backlight GPIO2
+- NTP / Software-Uhr
+- Renderintervall 200 ms
+- schmaler Neon-Effekt ohne dunkle Außenkontur
 
-Verwendet werden unter anderem TFT_eSPI 2.5.43, Adafruit RTClib 2.1.4,
-ESP32 WiFi/WebServer und `time.h` für NTP.
+Display, RGB-Farben, PSRAM und GT911-Touch wurden auf der vorhandenen
+Hardware getestet. Beim Sunton kann unmittelbar nach einem Neustart für
+ungefähr 15--20 Sekunden ein sichtbares Flackern auftreten; anschließend
+läuft die Anzeige im Test vollständig ruhig. Da dies den normalen
+Betrieb nicht beeinträchtigt, wurde die stabile RGB-Konfiguration nicht
+weiter verändert.
 
-Wichtige Einstellungen:
+## Ein Projekt für beide Boards
 
-- ST7796 über SPI
-- PSRAM mit `BOARD_HAS_PSRAM`
-- `lib_ldf_mode = deep+`
-- SPI-Takt 40 MHz
-- MISO GPIO12, MOSI GPIO13, SCLK GPIO14
-- CS GPIO15, DC GPIO21, RESET GPIO22, Backlight GPIO23
+Im Quelltext muss beim Hardwarewechsel nichts geändert werden. In
+PlatformIO wird nur das gewünschte Environment gewählt:
 
-## Speicher und flimmerfreie Darstellung
+- `wt32-sc01`
+- `sunton-8048s070`
 
-Es werden zwei vollständige 16-Bit-Sprites im PSRAM verwendet: `img` für
-das aktuelle Bild bzw. die Infoseite und `bgSprite` als
-Hintergrund-Cache.
+`BoardConfig.h` kapselt die hardwareabhängigen Unterschiede wie
+Displaytyp, Spritetyp, Touch-/I²C-Konfiguration, Backlight, Fontzugriff
+und Renderintervall.
 
-Ein 480×320-Sprite benötigt 307.200 Byte. Nach Erzeugung beider Sprites
-blieben beim Test rund **3,58 MB PSRAM frei**.
+Die gemeinsame Programmlogik enthält Fibonacci-Geometrie, automatische
+Display-Skalierung, Skalen, Sekundenellipse, Datum/Uhrzeit,
+Web-Konfiguration, Preferences, AP+STA, NTP, Zeitzonen, Touch-Infoseite,
+Hintergründe, Partikel und Effekte.
 
-Auch die Infoseite wird vollständig im Sprite aufgebaut und anschließend
-in einem Schritt übertragen. Dadurch bleiben Uhr und Infoseite
-flimmerfrei.
+## Projektstruktur
+
+``` text
+fibonacci-uhr/
+├── .gitignore
+├── README.md
+├── LICENSE.md
+├── platformio.ini
+├── include/
+│ ├── BoardConfig.h
+│ └── boards/
+│   └── LGFX_Sunton_8048S070.h
+└── src/
+  └── main.cpp
+```
+
+Das PlatformIO-Verzeichnis `.pio/` wird nicht in Git gespeichert.
+
+## PlatformIO und Display
+
+Beim WT32 werden TFT_eSPI/ST7796, 480 × 320, PSRAM und SPI mit 40 MHz
+verwendet. Die bekannten Pins sind MISO GPIO12, MOSI GPIO13, SCLK
+GPIO14, CS GPIO15, DC GPIO21, RESET GPIO22 und Backlight GPIO23.
+
+Beim Sunton werden ESP32-S3, LovyanGFX, das 800 × 480 RGB-Panel, 16 MB
+Flash, 8 MB Octal-PSRAM und GT911-Touch verwendet.
+
+## Automatische Display-Skalierung
+
+Die Darstellung basiert auf einem Referenzdesign von 480 × 320 Pixeln.
+
+WT32:
+
+``` text
+Display:   480 × 320
+Skalierung:  1,000
+```
+
+Sunton:
+
+``` text
+Display:   800 × 480
+Skalierung:  1,500
+Designfeld:  720 × 480
+Offset:  40 / 0
+```
+
+Geometrische Größen wie Radien, Positionen, Skalenlängen und Abstände
+werden proportional skaliert. Optische Größen wie Hauptstrichstärke,
+Fettversatz der Ziffern, Schnittpunktmarker und Spiralen-Linienstärke
+werden bewusst nicht vollständig mit der Displaygröße vergrößert.
+Dadurch bleibt die Darstellung auch auf dem 7"-Display fein und gut
+lesbar.
+
+## Speicher und Darstellung
+
+Es werden zwei vollständige 16-Bit-Sprites verwendet: `img` für das
+aktuelle Bild beziehungsweise die Infoseite und `bgSprite` als
+Hintergrund-Cache. Auch die Infoseite wird vollständig im Sprite
+aufgebaut und anschließend in einem Schritt übertragen.
+
+Beim WT32 benötigt ein 480×320×16-Bit-Sprite 307.200 Byte. Beim Sunton
+benötigt ein 800×480×16-Bit-Sprite 768.000 Byte; zwei Vollbild-Sprites
+benötigen zusammen rund 1,54 MB.
+
+Beim Sunton wurde das Renderintervall auf 200 ms beziehungsweise 5
+Bilder pro Sekunde reduziert. Dadurch verschwand das zuvor im
+Dauerbetrieb sichtbare Flimmern.
 
 ## Anzeige der Uhr
 
-### Stunden
+### Automatische 24-Stunden-Stundenskala
 
-Die Stundenspirale wird an der senkrechten Skala abgelesen. Oben liegen
-0 bis 6 Uhr, unten 6 bis 12 Uhr. Volle Stunden besitzen verstärkte
-Skalenstriche.
+Die Stundenspirale bleibt mathematisch eine **12-Stunden-Spirale** und
+führt weiterhin eine vollständige Umdrehung in 12 Stunden aus. Nur die
+Beschriftung der senkrechten Stundenskala wird automatisch an die
+aktuelle Tageshälfte angepasst.
+
+Von **00:00 bis 11:59 Uhr**:
+
+``` text
+obere Hälfte:  0  1  2  3  4  5  6
+untere Hälfte: 6  7  8  9 10 11 12
+```
+
+Von **12:00 bis 23:59 Uhr**:
+
+``` text
+obere Hälfte:  12 13 14 15 16 17 18
+untere Hälfte: 18 19 20 21 22 23 24
+```
+
+`24` ist die Endmarkierung der zweiten Tageshälfte. Nach `23:59:59`
+beginnt die Beschriftung wieder bei `0`. Die Position und Bewegung der
+Fibonacci-Spirale werden durch diese Umschaltung nicht verändert.
+
+Volle Stunden besitzen verstärkte Skalenstriche. Der Schnittpunkt
+zwischen Stundenspirale und senkrechter Skala zeigt die aktuelle Stunde.
 
 ### Minuten
 
@@ -67,6 +178,13 @@ ein verstärkter Skalenstrich dargestellt.
 Skalen und Beschriftungen sind von der globalen Helligkeitsregelung
 entkoppelt und bleiben dadurch gut lesbar.
 
+### Schnittpunktmarker
+
+Die Schnittpunkte der Stunden- und Minutenspirale mit ihren Skalen
+werden durch Marker hervorgehoben. Die Markergröße wird bewusst nicht
+proportional mit der Displayauflösung skaliert. Dadurch bleiben die
+Markierungen auf dem 7"-Sunton ähnlich dezent wie auf dem WT32.
+
 ### Sekunden
 
 60 Punkte liegen auf einer Ellipse, deren Radien aus den äußeren
@@ -76,39 +194,43 @@ Farbe ist über die Weboberfläche einstellbar.
 
 ### Digitale Datums- und Zeitanzeige
 
-Bei aktivierter Option **„Digitales Datum"** werden zusätzlich
-angezeigt:
+Bei aktivierter Option **„Digitales Datum"** werden zusätzlich Datum am
+unteren Rand und digitale Uhrzeit oben rechts im Format `HH:MM:SS`
+angezeigt. Digitale Anzeige und Fibonacci-Spiralen verwenden dieselbe
+Zeitquelle.
 
-- Datum am unteren Rand
-- digitale Uhrzeit oben rechts im Format `HH:MM:SS`
+## Optische Effekte
 
-Digitale Anzeige und Fibonacci-Spiralen verwenden dieselbe Zeitquelle.
+Zur Auswahl stehen Klassisch, Neon-Glühen und mathematischer
+Farbverlauf.
+
+Da WT32 und Sunton optisch unterschiedlich reagieren, wird der
+Neon-Effekt hardwareabhängig dargestellt. Beim WT32 bleibt der bewährte
+mehrstufige Glow erhalten. Beim Sunton wird eine schmale farbige
+Neonröhre mit hellem Kern verwendet; auf breite, gegen Schwarz gemischte
+Außenlinien wird verzichtet.
+
+Die eingestellte Spiralen-Linienstärke ist ein optischer Wert und wird
+nicht proportional mit der Displaygröße skaliert.
 
 ## Web-Konfiguration
 
 Die Uhr arbeitet gleichzeitig als eigener Access Point und optional als
 Teilnehmer im Haus-WLAN.
 
-### Setup-WLAN
+Setup-WLAN:
 
 - SSID: `Fibonacci-Clock-Setup`
 - Adresse: `http://192.168.4.1`
 
-Dieser Zugang bleibt als Rückfallebene erhalten.
-
-### Haus-WLAN
-
-Nach erfolgreicher Verbindung erhält die Uhr vom Router eine lokale
-IP-Adresse, z. B. `192.168.1.138`. Die Einstellungsseite ist dann auch
-direkt über diese Adresse aus dem Hausnetz erreichbar.
+Dieser Zugang bleibt als Rückfallebene erhalten. Nach erfolgreicher
+Verbindung mit dem Haus-WLAN ist die Einstellungsseite zusätzlich über
+die vom Router vergebene lokale IP-Adresse erreichbar.
 
 Konfigurierbar sind WLAN Ein/Aus, SSID, Passwort und Zeitzone. Die Werte
 werden in `Preferences` gespeichert. Ein leeres Passwortfeld behält das
-gespeicherte Passwort.
-
-Die WLAN-Verbindung wird nur bei echten Änderungen von WLAN Ein/Aus,
-SSID oder Passwort neu aufgebaut. Ein Zeitzonenwechsel verursacht
-**keinen WLAN-Neustart**.
+gespeicherte Passwort. Ein Zeitzonenwechsel verursacht keinen
+WLAN-Neustart.
 
 ## NTP und Zeitquellen
 
@@ -130,22 +252,14 @@ Priorität der Zeitquellen:
 2. NTP
 3. Software-Uhr / manuelle Übernahme vom Smartphone
 
+Beim getesteten Sunton-Aufbau wird keine externe RTC verwendet.
+
 ## Zeitzonen
 
 Die Zeitzone wird über ein Pulldown-Menü ausgewählt und gespeichert.
-
-Verfügbar sind:
-
-- Mitteleuropa -- Wien, Berlin, Zürich, Paris
-- Großbritannien / Irland -- London, Dublin
-- Osteuropa -- Helsinki, Bukarest
-- UTC -- Weltzeit
-- USA Eastern -- New York
-- USA Central -- Chicago
-- USA Mountain -- Denver
-- USA Pacific -- Los Angeles
-- Japan -- Tokio
-- Australien Eastern -- Sydney
+Verfügbar sind Mitteleuropa, Großbritannien/Irland, Osteuropa, UTC, USA
+Eastern, USA Central, USA Mountain, USA Pacific, Japan und Australien
+Eastern.
 
 POSIX-Zeitzonenregeln sorgen bei den entsprechenden Regionen automatisch
 für Sommer-/Winterzeit.
@@ -158,6 +272,11 @@ Zeitquelle, Zeitzone und letzten NTP-Abgleich.
 
 Ein Antippen des Displays blendet die Infoseite erneut für 10 Sekunden
 ein. Danach erfolgt automatisch die Rückkehr zur Uhr.
+
+Touch wird hardwareabhängig behandelt:
+
+- WT32: FT6x36-kompatibler Controller über I²C
+- Sunton: GT911 über LovyanGFX
 
 ## Einstellmöglichkeiten der Anzeige
 
@@ -177,38 +296,28 @@ Rückfallebene erhalten. Ohne NTP oder Hardware-RTC geht eine rein
 manuell gesetzte Software-Zeit nach einem vollständigen Stromausfall
 verloren.
 
-## Projektstruktur
-
-``` text
-Fibonacci-Uhr/
-├── .gitignore
-├── README.md
-├── platformio.ini
-├── src/
-│ └── main.cpp
-├── include/
-└── lib/
-```
-
-Das PlatformIO-Verzeichnis `.pio/` wird nicht in Git gespeichert.
-
 ## Diagnose
 
-Der serielle Monitor zeigt unter anderem I²C-/RTC-Status, Display- und
-PSRAM-Initialisierung, freien Speicher, WLAN-Status, IP-Adressen,
-NTP-Synchronisierung, Zeitzone und empfangene Web-Konfiguration.
+Der serielle Monitor zeigt unter anderem Hardwareprofil,
+Displayinitialisierung, PSRAM-Status und freien Speicher, RTC-Status
+soweit vorhanden, WLAN-Status, IP-Adressen, NTP-Synchronisierung,
+Zeitzone und empfangene Web-Konfiguration.
 
 ## Aktueller getesteter Stand
 
-Erfolgreich getestet:
+Erfolgreich getestet auf **beiden Hardwareplattformen**:
 
-- ST7796 über SPI und 480 × 320 Querformat
+- gemeinsamer Multi-Board-Programmstand
+- Auswahl der Hardware ausschließlich über PlatformIO
+- automatische Display-Skalierung 480×320 / 800×480
 - PSRAM und zwei Vollbild-Sprites
-- flimmerfreie Uhr und Infoseite
 - Fibonacci-Stunden- und Minutenspiralen
+- automatische 24-Stunden-Beschriftung der Stundenskala
 - verstärkte Hauptskalen
+- dezente Schnittpunktmarker
 - Sekundenellipse mit Nachleuchteffekt
 - einstellbare Farben, Helligkeit und Linienstärke
+- hardwareangepasster Neon-Effekt
 - digitale Datumsanzeige
 - digitale Uhrzeitanzeige `HH:MM:SS`
 - Web-Konfiguration
@@ -219,76 +328,22 @@ Erfolgreich getestet:
 - Zeitzonenauswahl und automatische Sommer-/Winterzeit
 - Zeitzonenwechsel ohne Netzwerkneustart
 - Neustart mit automatischer WLAN- und NTP-Wiederherstellung
+- gemeinsame Font-Abstraktion für TFT_eSPI und LovyanGFX
 
 ## Alternative Hardware -- ungetestet
 
-Die folgenden Boards sind **nicht mit diesem Projekt getestet**. Die
-Nennung bedeutet ausdrücklich **keine Funktionsgarantie und keine
-zugesicherte Kompatibilität**. Je nach Board müssen `platformio.ini`,
-Displaytreiber, GPIO-Belegung, Touchcontroller, Displayrotation,
-Hintergrundbeleuchtung und PSRAM-Konfiguration angepasst werden.
+Weitere ESP32-/ESP32-S3-Boards können grundsätzlich über ein
+zusätzliches PlatformIO-Environment und eine passende
+Hardwarekonfiguration ergänzt werden. Mögliche Kandidaten sind WT32-SC01
+Plus sowie verschiedene Makerfabs MaTouch 3,5"-Boards.
 
-Für die derzeitige Architektur ist **PSRAM dringend empfohlen**, da zwei
-vollständige 480×320×16-Bit-Sprites verwendet werden.
+Diese Boards wurden mit diesem Projekt **nicht getestet**. Die Nennung
+bedeutet keine Funktionsgarantie. Je nach Board müssen Displaytreiber,
+GPIO-Belegung, Touchcontroller, Displayrotation, Hintergrundbeleuchtung
+und PSRAM-Konfiguration ergänzt werden.
 
-### WT32-SC01 Plus
-
-ESP32-S3-basierter möglicher Nachfolger. Displayinterface, Pinbelegung
-und Controller-Konfiguration unterscheiden sich vom getesteten
-WT32-SC01.
-
-**Erwarteter Anpassungsaufwand:** hoch.
-
-### Makerfabs MaTouch ESP32-S3 SPI TFT 3.5"
-
-- ESP32-S3
-- 3,5", 480 × 320
-- ILI9488 über SPI
-- kapazitiver FT6236-Touch
-- PSRAM vorhanden
-
-Durch gleiche Auflösung und SPI grundsätzlich interessant. Treiber,
-Pins, Touch und PlatformIO-Konfiguration müssen angepasst werden.
-
-**Erwarteter Anpassungsaufwand:** mittel.
-
-### Makerfabs MaTouch ESP32-S3 Parallel TFT 3.5"
-
-- ESP32-S3
-- 3,5", 480 × 320
-- ILI9488
-- 16-Bit-Parallelinterface
-- FT6236-Touch
-- 8 MB PSRAM
-
-Die Speichergröße passt gut zu den Vollbild-Sprites; die
-Displayansteuerung unterscheidet sich jedoch grundlegend von der
-getesteten SPI-Version.
-
-**Erwarteter Anpassungsaufwand:** hoch.
-
-### Makerfabs ESP32 3.5" TFT Touch mit Camera
-
-- ESP32-WROVER
-- 3,5", 480 × 320
-- ILI9488 über SPI
-- Varianten mit kapazitivem oder resistivem Touch
-
-Durch ESP32-WROVER, SPI und gleiche Auflösung grundsätzlich interessant.
-Display-, Touch- und Pin-Konfiguration müssen dennoch angepasst werden.
-
-**Erwarteter Anpassungsaufwand:** mittel.
-
-### Andere ESP32-/ESP32-S3-Boards
-
-Eine Portierung ist grundsätzlich denkbar, wenn ausreichend PSRAM, WLAN
-und ein unterstütztes TFT vorhanden sind. Bei anderer Auflösung müssen
-zusätzlich Bildschirmgeometrie, Mittelpunkt, Skalenradien und
-Sekundenellipse angepasst werden.
-
-> **Wichtig:** Getestet und dokumentiert ist derzeit ausschließlich das
-> WT32-SC01 mit ESP32-WROVER-B und ST7796 über SPI. Alle Alternativen
-> sind mögliche Portierungsziele ohne Funktionsgarantie.
+PSRAM ist für die derzeitige Architektur mit zwei vollständigen
+16-Bit-Sprites dringend empfohlen.
 
 ## Lizenz
 
